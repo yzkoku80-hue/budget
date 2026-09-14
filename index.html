@@ -662,10 +662,11 @@ function delExpense(id){
 }
 function expenseReport(){
   var pid=curPid();
+  var h=budgetScorecard()+catScorecard()+yearScorecard();
   var pids=Object.keys(S.plans).sort();
   if(pids.indexOf(pid)<0) pids.push(pid);
   pids=pids.sort().slice(-12);
-  var h='<div class="card"><h2>Dönem karşılaştırması</h2><p class="sub">Son dönemlerin toplam harcaması.</p>';
+  h+='<div class="card"><h2>Dönem karşılaştırması</h2><p class="sub">Son dönemlerin toplam harcaması.</p>';
   var pts=pids.map(function(k){
     var t=sum(expensesOf(k),function(e){return +e.amount;});
     return {x:new Date(periodInfo(k).end+'T12:00:00').getTime(),y:t,k:k};
@@ -901,8 +902,126 @@ function savePrices(){
   var u=parseFloat(document.getElementById('prUsd').value); if(u>0) S.lastUsd=u;
   save(); closeSheet(); render();
 }
+/* --- karne --- */
+function scoredPids(){
+  var set={};
+  S.expenses.forEach(function(e){ set[periodIdOf(e.date)]=1; });
+  return Object.keys(set).sort();
+}
+function periodScore(pid){
+  var n=planNums(pid), spent=spentByCat(pid);
+  var inside=0, over=0, names=[], spT=0;
+  n.p.ec.forEach(function(c){
+    var m=catById(c.id); if(!m) return;
+    var lim=n.hb*c.p/100, kul=spent[c.id]||0;
+    spT+=kul;
+    if(lim<=0 && kul<=0) return;
+    if(kul>lim){ over++; names.push(m.n); } else inside++;
+  });
+  return {inside:inside,over:over,names:names,lim:n.hb,sp:spT};
+}
+function budgetScorecard(){
+  var pids=scoredPids(), cur=periodIdOf(today());
+  if(!pids.length) return '<div class="card"><h2>Bütçe karnesi</h2><div class="empty">Harcama kaydı girdikçe hangi dönemlerin tuttuğu burada görünür.</div></div>';
+  var h='<div class="card"><h2>Bütçe karnesi</h2><p class="sub">Her dönemde bütçenin tutup tutmadığı ve kaç kategorinin limiti aştığı. Devam eden dönem ayrı işaretlenir.</p>';
+  pids.slice().reverse().forEach(function(pid){
+    var s=periodScore(pid), ongoing=(pid===cur), fark=s.sp-s.lim;
+    var tag = ongoing ? '<span class="tag">sürüyor</span>'
+            : (fark<=0 ? '<span class="tag g">tuttu</span>' : '<span class="tag r">aştı</span>');
+    h+='<div class="catrow"><div class="between"><span class="catname">'+periodInfo(pid).label+' '+tag+'</span>'+
+       '<span class="catnums">'+tl(s.sp)+' / '+tl(s.lim)+'</span></div>'+barHtml(s.sp,s.lim)+
+       '<div class="between" style="margin-top:4px"><span class="lbl">'+s.inside+' kategori içinde, '+s.over+' kategori aşıldı</span>'+
+       '<span class="lbl '+(fark>0?'neg':'pos')+'">'+(fark>0?'+':'')+tl(fark)+'</span></div>';
+    if(s.names.length) h+='<p class="lbl" style="margin-top:3px">Aşılan '+esc(s.names.join(', '))+'</p>';
+    h+='</div>';
+  });
+  h+='</div>';
+  return h;
+}
+function catScorecard(){
+  var cur=periodIdOf(today());
+  var pids=scoredPids().filter(function(p){return p!==cur;});
+  if(!pids.length) return '<div class="card"><h2>Kategori karnesi</h2><div class="empty">Tamamlanmış dönem yok. Bu dönem bitince karne oluşur.</div></div>';
+  var m={};
+  pids.forEach(function(pid){
+    var n=planNums(pid), spent=spentByCat(pid);
+    n.p.ec.forEach(function(c){
+      var meta=catById(c.id); if(!meta) return;
+      var lim=n.hb*c.p/100, kul=spent[c.id]||0;
+      if(lim<=0 && kul<=0) return;
+      if(!m[c.id]) m[c.id]={n:meta.n,tot:0,over:0,lim:0,sp:0};
+      m[c.id].tot++; m[c.id].lim+=lim; m[c.id].sp+=kul;
+      if(kul>lim) m[c.id].over++;
+    });
+  });
+  var rows=Object.keys(m).map(function(k){return m[k];});
+  if(!rows.length) return '';
+  rows.sort(function(a,b){ return (b.over/b.tot)-(a.over/a.tot) || (b.sp-b.lim)-(a.sp-a.lim); });
+  var h='<div class="card"><h2>Kategori karnesi</h2><p class="sub">Tamamlanmış '+pids.length+' dönemin toplamı. En sık aşılan kategori en üstte.</p>';
+  h+='<div class="scroll"><table class="hold"><tr><th>Kategori</th><th>Aşılan</th><th>Ortalama kullanım</th><th>Toplam fark</th></tr>';
+  rows.forEach(function(r){
+    var use=r.lim>0?r.sp/r.lim*100:0, d=r.sp-r.lim;
+    h+='<tr><td>'+esc(r.n)+'</td><td class="'+(r.over?'neg':'pos')+'">'+r.over+' / '+r.tot+'</td>'+
+       '<td>'+pct(use)+'</td><td class="'+(d>0?'neg':'pos')+'">'+(d>0?'+':'')+tl(d)+'</td></tr>';
+  });
+  h+='</table></div></div>';
+  return h;
+}
+function yearScorecard(){
+  var pids=scoredPids();
+  if(pids.length<2) return '';
+  var y={};
+  pids.forEach(function(pid){
+    var yr=periodInfo(pid).end.slice(0,4), n=planNums(pid);
+    var sp=sum(expensesOf(pid),function(e){return +e.amount;});
+    if(!y[yr]) y[yr]={n:0,lim:0,sp:0,over:0};
+    y[yr].n++; y[yr].lim+=n.hb; y[yr].sp+=sp;
+    if(sp>n.hb) y[yr].over++;
+  });
+  var ks=Object.keys(y).sort().reverse();
+  var h='<div class="card"><h2>Yıllık özet</h2><p class="sub">Dönem adının ait olduğu yıla göre toplanır.</p>';
+  h+='<div class="scroll"><table class="hold"><tr><th>Yıl</th><th>Dönem</th><th>Bütçe</th><th>Harcama</th><th>Fark</th><th>Aşılan dönem</th></tr>';
+  ks.forEach(function(k){
+    var r=y[k], d=r.sp-r.lim;
+    h+='<tr><td>'+k+'</td><td>'+r.n+'</td><td>'+tl(r.lim)+'</td><td>'+tl(r.sp)+'</td>'+
+       '<td class="'+(d>0?'neg':'pos')+'">'+(d>0?'+':'')+tl(d)+'</td>'+
+       '<td class="'+(r.over?'neg':'pos')+'">'+r.over+' / '+r.n+'</td></tr>';
+  });
+  h+='</table></div></div>';
+  return h;
+}
+function investScorecard(){
+  var set={};
+  S.invests.forEach(function(i){ if(i.bucket==='uzun') set[periodIdOf(i.date)]=1; });
+  var pids=Object.keys(set).sort();
+  if(!pids.length) return '';
+  var cur=periodIdOf(today());
+  var h='<div class="card"><h2>Birikim karnesi</h2><p class="sub">Her dönemde birikim hedefinin ne kadarına ulaşıldığı ve hangi kalemlerin eksik kaldığı.</p>';
+  pids.reverse().forEach(function(pid){
+    var n=planNums(pid), byCat=investedByCat(pid,'uzun');
+    var yat=0; Object.keys(byCat).forEach(function(k){ yat+=byCat[k]; });
+    var eksik=[];
+    n.p.sc.forEach(function(c){
+      var m=savById(c.id); if(!m) return;
+      var lim=n.bb*c.p/100;
+      if(lim>0 && (byCat[c.id]||0) < lim*0.99) eksik.push(m.n);
+    });
+    var ongoing=(pid===cur), fark=yat-n.bb;
+    var tag = ongoing ? '<span class="tag">sürüyor</span>'
+            : (fark>=0 ? '<span class="tag g">hedefe ulaşıldı</span>' : '<span class="tag r">eksik kaldı</span>');
+    h+='<div class="catrow"><div class="between"><span class="catname">'+periodInfo(pid).label+' '+tag+'</span>'+
+       '<span class="catnums">'+tl(yat)+' / '+tl(n.bb)+'</span></div>'+barHtml(yat,n.bb,true)+
+       '<div class="between" style="margin-top:4px"><span class="lbl">'+(n.bb>0?pct(yat/n.bb*100)+' tamamlandı':'Hedef tanımlı değil')+'</span>'+
+       '<span class="lbl '+(fark<0?'neg':'pos')+'">'+(fark>0?'+':'')+tl(fark)+'</span></div>';
+    if(eksik.length) h+='<p class="lbl" style="margin-top:3px">Eksik '+esc(eksik.join(', '))+'</p>';
+    h+='</div>';
+  });
+  h+='</div>';
+  return h;
+}
 function investReport(){
-  var h='<div class="card"><h2>Birikmiş yatırım</h2><p class="sub">Tüm dönemlerin toplamı. Mavi çizgi lira, sarı çizgi dolar karşılığı.</p>';
+  var h=investScorecard();
+  h+='<div class="card"><h2>Birikmiş yatırım</h2><p class="sub">Tüm dönemlerin toplamı. Mavi çizgi lira, sarı çizgi dolar karşılığı.</p>';
   var all=S.invests.slice();
   if(all.length<2){ h+='<div class="empty">Grafik için en az iki yatırım kaydı gerekiyor.</div></div>'; return h; }
   var ptsTl=cumSeries(all,function(i){return netTl(i);});

@@ -316,6 +316,26 @@ function investedByCat(pid,bucket){
   investsOf(pid,bucket).forEach(function(i){ m[i.cat]=(m[i.cat]||0)+netTl(i); });
   return m;
 }
+/* Fon hedefi: kategoriye bağlı fonda hedef, kategorinin limitinden o dönemde
+   yapılan harcama düşülerek bulunur. Harcamadan artan fonu ise fonu olan
+   kategorilerin kalanını saymaz, iki kez birikmesin diye. */
+function fundTargets(pid){
+  var n=planNums(pid), spent=spentByCat(pid), out={}, fonKalan=0, toplam=0;
+  Object.keys(spent).forEach(function(k){ toplam+=spent[k]; });
+  S.funds.forEach(function(f){
+    if(f.src==='artan') return;
+    var pc=n.p.ec.filter(function(x){return x.id===f.src;})[0];
+    var lim=pc?n.hb*pc.p/100:0, kul=spent[f.src]||0;
+    var hedef=Math.max(0,lim-kul);
+    out[f.id]={hedef:hedef,limit:lim,harcanan:kul,cat:f.src};
+    fonKalan+=hedef;
+  });
+  S.funds.forEach(function(f){
+    if(f.src!=='artan') return;
+    out[f.id]={hedef:Math.max(0,(n.hb-toplam)-fonKalan),limit:n.hb,harcanan:toplam,cat:'artan'};
+  });
+  return out;
+}
 
 /* ---------- gezinme ---------- */
 var subTab={yatirim:'uzun',harcama:'gir'};
@@ -457,14 +477,14 @@ function viewPlan(){
   h+='</div>';
 
   h+='<div class="card"><h2>Fon hedefleri</h2>';
-  h+='<p class="sub">Her ay harcanmayan kalemler için ayrılan tutarlar. Bu tutarlar Yatırımlar sekmesindeki fon hesaplarına aktarılır.</p>';
+  h+='<p class="sub">Kategorinin limitinden o dönemde yapılan harcama düşülür, kalanı fona ayrılır. Harcamadan artan, fonu olmayan kategorilerde kalan tutardır.</p>';
+  var ft=fundTargets(pid);
   S.funds.forEach(function(f){
-    var hedef=0;
-    if(f.src==='artan'){ hedef=Math.max(0,n.hb-toplamHarcama); }
-    else { var pc=p.ec.filter(function(x){return x.id===f.src;})[0]; if(pc) hedef=n.hb*pc.p/100; }
+    var t=ft[f.id]||{hedef:0,limit:0,harcanan:0};
     var yat=0; investsOf(pid,'fon').forEach(function(i){ if(i.cat===f.id) yat+=netTl(i); });
     h+='<div class="catrow"><div class="between"><span class="catname">'+esc(f.n)+' <span class="tag">'+esc(f.v)+'</span></span>';
-    h+='<span class="catnums">'+tl(yat)+' / '+tl(hedef)+'</span></div>'+barHtml(yat,hedef,true)+'</div>';
+    h+='<span class="catnums">'+tl(yat)+' / '+tl(t.hedef)+'</span></div>'+barHtml(yat,t.hedef,true);
+    h+='<p class="lbl" style="margin-top:4px">Limit '+tl(t.limit)+' · harcanan '+tl(t.harcanan)+'</p></div>';
   });
   h+='</div>';
 
@@ -570,21 +590,24 @@ function viewHarcama(){
   h+='</div>';
 
   if(subTab.harcama==='gir'){
-    h+='<div class="card"><h2>Yeni harcama</h2>';
+    h+='<div class="card"><h2>Yeni kayıt</h2>';
     h+='<label class="f"><span>Tarih</span><input type="date" id="exDate" value="'+today()+'"></label>';
     h+='<label class="f"><span>Kategori</span><select id="exCat" onchange="fillSub()">'+
         p.ec.map(function(c){var m=catById(c.id);return m?'<option value="'+c.id+'">'+esc(m.n)+'</option>':'';}).join('')+'</select></label>';
     h+='<label class="f" id="exSubWrap"><span>Alt kalem</span><select id="exSub"></select></label>';
-    h+='<label class="f"><span>Tutar (₺)</span><input type="number" inputmode="decimal" id="exAmt" placeholder="0"></label>';
+    h+='<div class="grid2"><label class="f"><span>Kayıt türü</span><select id="exType" onchange="exTypeChange()">'+
+       '<option value="harcama">Harcama</option><option value="iade">İade / geri ödeme</option></select></label>';
+    h+='<label class="f"><span>Tutar (₺)</span><input type="number" inputmode="decimal" id="exAmt" placeholder="0"></label></div>';
+    h+='<p class="sub" style="margin:-4px 0 10px">İade seçilirse tutar kategoriden düşülür. Eksi işareti yazmanıza gerek yok.</p>';
     h+='<label class="f"><span>Not</span><input type="text" id="exNote" placeholder="İsteğe bağlı"></label>';
-    h+='<button class="wide" onclick="addExpense()">Harcamayı kaydet</button></div>';
+    h+='<button class="wide" id="exBtn" onclick="addExpense()">Harcamayı kaydet</button></div>';
 
     var spent=spentByCat(pid);
     h+='<div class="card"><h2>Bu dönemde kullanılan limitler</h2>';
     p.ec.slice().sort(function(a,b){return (spent[b.id]||0)-(spent[a.id]||0);}).forEach(function(c){
       var m=catById(c.id); if(!m)return;
       var lim=n.hb*c.p/100, kul=spent[c.id]||0;
-      if(kul===0) return;
+      if(spent[c.id]===undefined) return;
       h+='<div class="catrow"><div class="between"><span class="catname">'+esc(m.n)+'</span><span class="catnums">'+tl(kul)+' / '+tl(lim)+'</span></div>'+barHtml(kul,lim)+'</div>';
     });
     if(!Object.keys(spent).length) h+='<div class="empty">Bu dönemde henüz harcama yok. İlk kaydı yukarıdan girin.</div>';
@@ -597,10 +620,10 @@ function viewHarcama(){
     h+='<div class="card"><div class="between"><h2>'+periodInfo(pid).label+' kayıtları</h2><span class="tag">'+list.length+' kayıt</span></div>';
     if(!list.length) h+='<div class="empty">Kayıt yok.</div>';
     list.forEach(function(e){
-      var m=catById(e.cat);
-      h+='<div class="item"><div class="d">'+dshort(e.date)+'</div><div class="t"><b>'+esc(m?m.n:e.cat)+'</b>'+
+      var m=catById(e.cat), ia=e.amount<0;
+      h+='<div class="item"><div class="d">'+dshort(e.date)+'</div><div class="t"><b>'+esc(m?m.n:e.cat)+(ia?' <span class="tag g">iade</span>':'')+'</b>'+
          '<small>'+esc([e.sub,e.note].filter(Boolean).join(' · ')||'—')+'</small></div>'+
-         '<div class="a">'+tl(e.amount)+'<br><button class="ghost slim" style="margin-top:4px" onclick="editExpense(\''+e.id+'\')">Düzenle</button></div></div>';
+         '<div class="a'+(ia?' pos':'')+'">'+tl(e.amount)+'<br><button class="ghost slim" style="margin-top:4px" onclick="editExpense(\''+e.id+'\')">Düzenle</button></div></div>';
     });
     h+='<hr class="sep"><div class="between"><span class="lbl">Dönem toplamı</span><span class="mid">'+tl(sum(list,function(x){return +x.amount;}))+'</span></div></div>';
   }
@@ -618,16 +641,21 @@ function fillSub(){
   document.getElementById('exSubWrap').style.display=subs.length?'block':'none';
   sel.innerHTML='<option value=""></option>'+subs.map(function(s){return '<option>'+esc(s)+'</option>';}).join('');
 }
+function exTypeChange(){
+  var t=document.getElementById('exType').value, b=document.getElementById('exBtn');
+  if(b) b.textContent = t==='iade' ? 'İadeyi kaydet' : 'Harcamayı kaydet';
+}
 function addExpense(){
-  var a=parseFloat(document.getElementById('exAmt').value);
+  var a=Math.abs(parseFloat(document.getElementById('exAmt').value));
   if(!a||a<=0){ alert('Tutar girin.'); return; }
   var subEl=document.getElementById('exSub');
+  var t=document.getElementById('exType').value;
   S.expenses.push({
     id:'e'+Date.now()+Math.random().toString(36).slice(2,6),
     date:document.getElementById('exDate').value||today(),
     cat:document.getElementById('exCat').value,
     sub:subEl?subEl.value:'',
-    amount:a,
+    amount:t==='iade'?-a:a,
     note:document.getElementById('exNote').value.trim()
   });
   save(); render();
@@ -640,7 +668,10 @@ function editExpense(id){
   h+='<label class="f"><span>Kategori</span><select id="edCat">'+
       p.ec.map(function(c){var m=catById(c.id);return m?'<option value="'+c.id+'"'+(c.id===e.cat?' selected':'')+'>'+esc(m.n)+'</option>':'';}).join('')+'</select></label>';
   h+='<label class="f"><span>Alt kalem</span><input type="text" id="edSub" value="'+esc(e.sub)+'"></label>';
-  h+='<label class="f"><span>Tutar (₺)</span><input type="number" inputmode="decimal" id="edAmt" value="'+e.amount+'"></label>';
+  h+='<div class="grid2"><label class="f"><span>Kayıt türü</span><select id="edType">'+
+     '<option value="harcama"'+(e.amount>=0?' selected':'')+'>Harcama</option>'+
+     '<option value="iade"'+(e.amount<0?' selected':'')+'>İade / geri ödeme</option></select></label>';
+  h+='<label class="f"><span>Tutar (₺)</span><input type="number" inputmode="decimal" id="edAmt" value="'+Math.abs(e.amount)+'"></label></div>';
   h+='<label class="f"><span>Not</span><input type="text" id="edNote" value="'+esc(e.note)+'"></label>';
   h+='<div class="row" style="margin-top:12px"><button class="danger" onclick="delExpense(\''+id+'\')">Sil</button>'+
      '<button class="ghost grow" onclick="closeSheet()">Vazgeç</button><button class="grow" onclick="saveExpense(\''+id+'\')">Kaydet</button></div>';
@@ -651,7 +682,8 @@ function saveExpense(id){
   e.date=document.getElementById('edDate').value;
   e.cat=document.getElementById('edCat').value;
   e.sub=document.getElementById('edSub').value.trim();
-  e.amount=parseFloat(document.getElementById('edAmt').value)||0;
+  var ea=Math.abs(parseFloat(document.getElementById('edAmt').value)||0);
+  e.amount=document.getElementById('edType').value==='iade'?-ea:ea;
   e.note=document.getElementById('edNote').value.trim();
   save(); closeSheet(); render();
 }
@@ -723,12 +755,10 @@ function investPane(bucket){
   var pid=curPid(), n=planNums(pid);
   var cats = bucket==='uzun'
     ? n.p.sc.map(function(c){var m=savById(c.id);return m?{id:m.id,n:m.n,unit:m.unit,subs:(m.subs||[]).map(function(s){return s.n;}),limit:n.bb*c.p/100}:null;}).filter(Boolean)
-    : S.funds.map(function(f){
-        var hedef=0;
-        if(f.src==='artan'){ hedef=Math.max(0,n.hb-sum(expensesOf(pid),function(e){return +e.amount;})); }
-        else { var pc=n.p.ec.filter(function(x){return x.id===f.src;})[0]; if(pc) hedef=n.hb*pc.p/100; }
-        return {id:f.id,n:f.n,unit:f.unit,subs:[],limit:hedef,v:f.v};
-      });
+    : (function(){ var ft=fundTargets(pid); return S.funds.map(function(f){
+        var t=ft[f.id]||{hedef:0,limit:0,harcanan:0};
+        return {id:f.id,n:f.n,unit:f.unit,subs:[],limit:t.hedef,v:f.v,catLimit:t.limit,catSpent:t.harcanan};
+      }); })();
 
   var h='<div class="card"><h2>'+(bucket==='uzun'?'Uzun vadeli yatırım gir':'Fon yatırımı gir')+'</h2>';
   h+='<p class="sub">'+(bucket==='uzun'
@@ -755,7 +785,8 @@ function investPane(bucket){
   cats.forEach(function(c){
     var yat=inv[c.id]||0;
     h+='<div class="catrow"><div class="between"><span class="catname">'+esc(c.n)+'</span><span class="catnums">'+tl(yat)+' / '+tl(c.limit)+'</span></div>'+barHtml(yat,c.limit,true);
-    h+='<p class="lbl" style="margin-top:4px">'+(c.limit>0?pct(yat/c.limit*100)+' tamamlandı':'Hedef tanımlı değil')+'</p></div>';
+    h+='<p class="lbl" style="margin-top:4px">'+(c.limit>0?pct(yat/c.limit*100)+' tamamlandı':'Hedef kalmadı')+
+       (c.catLimit!==undefined?' · limit '+tl(c.catLimit)+', harcanan '+tl(c.catSpent):'')+'</p></div>';
   });
   h+='</div>';
 

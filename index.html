@@ -122,7 +122,7 @@ nav button i{display:block;font-size:18px;font-style:normal;line-height:1.25;mar
 .legend{display:flex;gap:14px;font-size:12px;color:var(--ink3);margin-top:6px}
 .legend s{display:inline-block;width:9px;height:3px;text-decoration:none;vertical-align:middle;margin-right:4px}
 .warnbar{background:var(--gold-soft);color:#6B5314;padding:8px 12px;border-radius:8px;font-size:12.5px;margin-bottom:12px}
-.pctin{width:62px;text-align:right;padding:6px 8px}
+input.pctin{width:74px;flex:0 0 74px;text-align:right;padding:6px 8px}
 table.hold{width:100%;border-collapse:collapse;font-size:13px}
 table.hold th{text-align:right;font-weight:500;color:var(--ink3);font-size:11.5px;padding:0 0 6px;border-bottom:1px solid var(--line)}
 table.hold th:first-child{text-align:left}
@@ -470,7 +470,14 @@ function viewPlan(){
     h+='<div class="catrow"><div class="between"><span class="catname">'+esc(meta.n)+' <span class="tag y">%'+nf2.format(c.p).replace(',00','')+'</span></span>';
     h+='<span class="catnums">'+tl(kul)+' / '+tl(lim)+'</span></div>'+barHtml(kul,lim,true);
     if(meta.subs&&meta.subs.length){
+      var st=sum(meta.subs,function(s){return +s.p;});
       h+='<p class="lbl" style="margin-top:4px">'+meta.subs.map(function(s){return esc(s.n)+' '+tl(lim*s.p/100);}).join(' · ')+'</p>';
+      h+='<div class="between" style="margin-top:3px"><span class="lbl'+(Math.abs(st-100)>0.05?' neg':'')+'">Alt kalem toplamı %'+nf2.format(st).replace(',00','')+
+         (Math.abs(st-100)>0.05?' · '+tl(lim*st/100)+' dağıtılıyor, limit '+tl(lim):'')+'</span>'+
+         '<button class="ghost slim" onclick="editSubs(\''+meta.id+'\')">Alt oranlar</button></div>';
+    } else {
+      h+='<div class="between" style="margin-top:3px"><span class="lbl">Alt kalem yok</span>'+
+         '<button class="ghost slim" onclick="editSubs(\''+meta.id+'\')">Alt oranlar</button></div>';
     }
     h+='</div>';
   });
@@ -551,6 +558,72 @@ function editSplit(){
 function saveSplit(){
   var v=Math.max(0,Math.min(100,parseFloat(document.getElementById('spl').value)||0));
   var p=getPlan(curPid(),true); p.splitH=v; S.splitH=v; save(); closeSheet(); render();
+}
+function editSubs(catId){
+  var m=savById(catId); if(!m)return;
+  var n=planNums(curPid()), pc=n.p.sc.filter(function(x){return x.id===catId;})[0];
+  var lim=pc?n.bb*pc.p/100:0;
+  var h='<h2>'+esc(m.n)+' alt oranları</h2>';
+  h+='<p class="sub">Toplam 100 olmalı. Bu dönemde '+esc(m.n)+' için ayrılan tutar '+tl(lim)+'.</p>';
+  h+='<div id="sbList">';
+  (m.subs||[]).forEach(function(s){ h+=subRow(s.n,s.p); });
+  h+='</div>';
+  h+='<div class="row" style="margin-top:6px"><button class="ghost slim" onclick="addSubRow()">Alt kalem ekle</button>'+
+     '<button class="ghost slim" onclick="spreadSubs()">Eşit dağıt</button></div>';
+  h+='<p class="lbl" id="sbTot" style="margin-top:10px"></p>';
+  h+='<div class="row" style="margin-top:12px"><button class="ghost grow" onclick="closeSheet()">Vazgeç</button>'+
+     '<button class="grow" onclick="saveSubs(\''+catId+'\')">Kaydet</button></div>';
+  openSheet(h);
+  sbWatch(lim);
+}
+function subRow(nm,p){
+  return '<div class="row sbrow" style="margin-bottom:7px">'+
+    '<input type="text" class="grow" data-f="n" value="'+esc(nm||'')+'" placeholder="Alt kalem">'+
+    '<input type="number" inputmode="decimal" class="pctin" data-f="p" value="'+(p===undefined?'':p)+'">'+
+    '<button class="ghost slim" onclick="this.parentNode.remove();sbTotal()">×</button></div>';
+}
+var sbLim=0;
+function sbWatch(lim){
+  sbLim=lim;
+  var box=document.getElementById('sbList');
+  if(box) box.addEventListener('input',sbTotal);
+  sbTotal();
+}
+function sbTotal(){
+  var box=document.getElementById('sbList'), out=document.getElementById('sbTot');
+  if(!box||!out)return;
+  var t=0;
+  box.querySelectorAll('[data-f=p]').forEach(function(i){ t+=parseFloat(i.value)||0; });
+  var fark=Math.abs(t-100)>0.05;
+  out.className='lbl'+(fark?' neg':' pos');
+  out.textContent='Toplam %'+nf2.format(t)+' · dağıtılan '+tl(sbLim*t/100)+(fark?' (limit '+tl(sbLim)+')':'');
+}
+function addSubRow(){
+  var d=document.createElement('div');
+  d.innerHTML=subRow('','');
+  document.getElementById('sbList').appendChild(d.firstChild);
+  sbTotal();
+}
+function spreadSubs(){
+  var rows=document.getElementById('sbList').querySelectorAll('.sbrow');
+  if(!rows.length)return;
+  var pay=Math.round(100/rows.length*10)/10;
+  rows.forEach(function(r,i){
+    r.querySelector('[data-f=p]').value = i===rows.length-1
+      ? Math.round((100-pay*(rows.length-1))*10)/10 : pay;
+  });
+  sbTotal();
+}
+function saveSubs(catId){
+  var m=savById(catId); if(!m)return;
+  var out=[];
+  document.getElementById('sbList').querySelectorAll('.sbrow').forEach(function(r){
+    var nm=r.querySelector('[data-f=n]').value.trim();
+    if(!nm)return;
+    out.push({n:nm,p:parseFloat(r.querySelector('[data-f=p]').value)||0});
+  });
+  m.subs=out;
+  save(); closeSheet(); render();
 }
 function editCats(kind){
   var p=getPlan(curPid(),true);
@@ -941,15 +1014,21 @@ function scoredPids(){
 }
 function periodScore(pid){
   var n=planNums(pid), spent=spentByCat(pid);
-  var inside=0, over=0, names=[], spT=0;
+  var inside=0, over=0, names=[], spT=0, bilinmeyen=0, bnAd=[], known={};
   n.p.ec.forEach(function(c){
     var m=catById(c.id); if(!m) return;
+    known[c.id]=1;
     var lim=n.hb*c.p/100, kul=spent[c.id]||0;
-    spT+=kul;
     if(lim<=0 && kul<=0) return;
     if(kul>lim){ over++; names.push(m.n); } else inside++;
   });
-  return {inside:inside,over:over,names:names,lim:n.hb,sp:spT};
+  /* Toplam, silinmiş kategorilerdeki kayıtları da sayar. Yoksa karne ile
+     dönem toplamı birbirini tutmaz. */
+  Object.keys(spent).forEach(function(k){
+    spT+=spent[k];
+    if(!known[k]){ bilinmeyen+=spent[k]; bnAd.push(k); }
+  });
+  return {inside:inside,over:over,names:names,lim:n.hb,sp:spT,bilinmeyen:bilinmeyen,bnAd:bnAd};
 }
 function budgetScorecard(){
   var pids=scoredPids(), cur=periodIdOf(today());
@@ -964,6 +1043,7 @@ function budgetScorecard(){
        '<div class="between" style="margin-top:4px"><span class="lbl">'+s.inside+' kategori içinde, '+s.over+' kategori aşıldı</span>'+
        '<span class="lbl '+(fark>0?'neg':'pos')+'">'+(fark>0?'+':'')+tl(fark)+'</span></div>';
     if(s.names.length) h+='<p class="lbl" style="margin-top:3px">Aşılan '+esc(s.names.join(', '))+'</p>';
+    if(s.bilinmeyen) h+='<p class="lbl neg" style="margin-top:3px">Silinmiş kategorilerde '+tl(s.bilinmeyen)+' kayıt var ('+esc(s.bnAd.join(', '))+'). Toplama dahil, kategori karnesine değil.</p>';
     h+='</div>';
   });
   h+='</div>';
@@ -1001,24 +1081,28 @@ function catScorecard(){
 function yearScorecard(){
   var pids=scoredPids();
   if(pids.length<2) return '';
-  var y={};
+  var y={}, cur=periodIdOf(today());
   pids.forEach(function(pid){
     var yr=periodInfo(pid).end.slice(0,4), n=planNums(pid);
     var sp=sum(expensesOf(pid),function(e){return +e.amount;});
-    if(!y[yr]) y[yr]={n:0,lim:0,sp:0,over:0};
+    if(!y[yr]) y[yr]={n:0,lim:0,sp:0,over:0,suren:0};
     y[yr].n++; y[yr].lim+=n.hb; y[yr].sp+=sp;
-    if(sp>n.hb) y[yr].over++;
+    if(pid===cur) y[yr].suren++;
+    else if(sp>n.hb) y[yr].over++;
   });
-  var ks=Object.keys(y).sort().reverse();
+  var ks=Object.keys(y).sort().reverse(), surenVar=false;
   var h='<div class="card"><h2>Yıllık özet</h2><p class="sub">Dönem adının ait olduğu yıla göre toplanır.</p>';
-  h+='<div class="scroll"><table class="hold"><tr><th>Yıl</th><th>Dönem</th><th>Bütçe</th><th>Harcama</th><th>Fark</th><th>Aşılan dönem</th></tr>';
+  h+='<div class="scroll"><table class="hold"><tr><th>Yıl</th><th>Dönem</th><th>Bütçe</th><th>Harcama</th><th>Fark</th><th>Aşılan</th></tr>';
   ks.forEach(function(k){
-    var r=y[k], d=r.sp-r.lim;
-    h+='<tr><td>'+k+'</td><td>'+r.n+'</td><td>'+tl(r.lim)+'</td><td>'+tl(r.sp)+'</td>'+
+    var r=y[k], d=r.sp-r.lim, bitmis=r.n-r.suren;
+    if(r.suren) surenVar=true;
+    h+='<tr><td>'+k+(r.suren?' <span class="lbl">(1 sürüyor)</span>':'')+'</td><td>'+r.n+'</td><td>'+tl(r.lim)+'</td><td>'+tl(r.sp)+'</td>'+
        '<td class="'+(d>0?'neg':'pos')+'">'+(d>0?'+':'')+tl(d)+'</td>'+
-       '<td class="'+(r.over?'neg':'pos')+'">'+r.over+' / '+r.n+'</td></tr>';
+       '<td class="'+(r.over?'neg':'pos')+'">'+r.over+' / '+bitmis+'</td></tr>';
   });
-  h+='</table></div></div>';
+  h+='</table></div>';
+  if(surenVar) h+='<p class="sub" style="margin:10px 0 0">Süren dönemin bütçesi tam, harcaması henüz yarım. Fark sütunu o dönem bitene kadar olduğundan iyi görünür. Aşılan sütunu yalnızca tamamlanmış dönemleri sayar.</p>';
+  h+='</div>';
   return h;
 }
 function investScorecard(){
@@ -1110,13 +1194,13 @@ function viewAyar(){
 function manageCats(kind){
   var list=S[kind];
   var h='<h2>'+(kind==='expenseCats'?'Harcama':'Birikim')+' kategorileri</h2>';
-  h+='<p class="sub">Adı değiştirin, alt kalemleri virgülle ayırın. Kategori silmek geçmiş kayıtları silmez.</p><div id="mcList">';
+  h+='<p class="sub">Burada kategori ve alt kalem adları değişir. Birikim alt kalemlerinin yüzdeleri Planlama sekmesindeki Alt oranlar düğmesinden ayarlanır. Yeni eklenen alt kalem, kalan paydan beslenir.</p><div id="mcList">';
   list.forEach(function(c){
     var subs=(c.subs||[]).map(function(s){return typeof s==='string'?s:s.n;}).join(', ');
     h+='<div class="catrow" data-id="'+c.id+'">'+
        '<input type="text" data-f="n" value="'+esc(c.n)+'">'+
        '<input type="text" data-f="subs" value="'+esc(subs)+'" placeholder="Alt kalemler" style="margin-top:5px">'+
-       '<div class="row" style="margin-top:5px;justify-content:flex-end"><button class="ghost slim" onclick="this.closest(\'.catrow\').remove()">Kategoriyi kaldır</button></div></div>';
+       '<div class="row" style="margin-top:5px;justify-content:flex-end"><button class="ghost slim" onclick="dropCatRow(this,\''+kind+'\',\''+c.id+'\')">Kategoriyi kaldır</button></div></div>';
   });
   h+='</div><button class="ghost slim" onclick="addCatRow()">Kategori ekle</button>';
   h+='<div class="row" style="margin-top:14px"><button class="ghost grow" onclick="closeSheet()">Vazgeç</button><button class="grow" onclick="saveCatsMeta(\''+kind+'\')">Kaydet</button></div>';
@@ -1130,6 +1214,13 @@ function addCatRow(){
     '<div class="row" style="margin-top:5px;justify-content:flex-end"><button class="ghost slim" onclick="this.closest(\'.catrow\').remove()">Kategoriyi kaldır</button></div>';
   document.getElementById('mcList').appendChild(d);
 }
+function dropCatRow(btn,kind,id){
+  var n = kind==='expenseCats'
+    ? S.expenses.filter(function(e){return e.cat===id;}).length
+    : S.invests.filter(function(i){return i.cat===id;}).length;
+  if(n && !confirm('Bu kategoride '+n+' kayıt var. Kategoriyi kaldırırsanız kayıtlar silinmez ama adı kaybolur, raporlarda kod olarak görünür. Devam edilsin mi?')) return;
+  btn.closest('.catrow').remove();
+}
 function saveCatsMeta(kind){
   var out=[], old=S[kind];
   document.getElementById('mcList').querySelectorAll('.catrow').forEach(function(r){
@@ -1137,12 +1228,25 @@ function saveCatsMeta(kind){
     var n=r.querySelector('[data-f=n]').value.trim(); if(!n)return;
     var subsRaw=r.querySelector('[data-f=subs]').value.split(',').map(function(x){return x.trim();}).filter(Boolean);
     var prev=old.filter(function(c){return c.id===id;})[0]||{};
-    var subs = kind==='savingCats'
-      ? subsRaw.map(function(x){
-          var pv=(prev.subs||[]).filter(function(s){return s.n===x;})[0];
-          return {n:x,p:pv?pv.p:Math.round(100/Math.max(1,subsRaw.length))};
-        })
-      : subsRaw;
+    var subs=subsRaw;
+    if(kind==='savingCats'){
+      /* Yeni alt kalem, kalan paydan beslenir. Böylece eskileri bozulmadan
+         toplam 100'ü aşmaz. Çıkarılan kalemin payı yeniye geçer. */
+      var kalanlar=[], yeniler=[];
+      subsRaw.forEach(function(x){
+        var pv=(prev.subs||[]).filter(function(s){return s.n===x;})[0];
+        if(pv) kalanlar.push({n:x,p:+pv.p||0}); else yeniler.push({n:x,p:0});
+      });
+      var kt=0; kalanlar.forEach(function(o){kt+=o.p;});
+      if(yeniler.length){
+        var pay=Math.max(0,100-kt)/yeniler.length;
+        yeniler.forEach(function(o){ o.p=Math.round(pay*10)/10; });
+      }
+      subs=subsRaw.map(function(x){
+        return kalanlar.filter(function(k){return k.n===x;})[0] ||
+               yeniler.filter(function(k){return k.n===x;})[0];
+      });
+    }
     out.push({id:id,n:n,p:prev.p||0,unit:prev.unit||'adet',subs:subs,fund:prev.fund});
   });
   S[kind]=out;

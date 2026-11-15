@@ -130,6 +130,22 @@ table.hold td{padding:8px 0;border-bottom:1px solid var(--line);text-align:right
 table.hold td:first-child{text-align:left;white-space:normal}
 .scroll{overflow-x:auto;-webkit-overflow-scrolling:touch}
 hr.sep{border:none;border-top:1px solid var(--line);margin:14px 0}
+.kv{display:grid;grid-template-columns:1fr auto auto;gap:3px 12px;font-size:12.5px;margin-top:7px;align-items:baseline}
+.kv>span{white-space:nowrap}
+.kv .h{color:var(--ink3)}
+.kv .r{text-align:right}
+.stat2{display:grid;grid-template-columns:1fr 1fr;gap:10px 12px}
+.infobar{background:#E2EBF1;color:#22465D;padding:10px 12px;border-radius:8px;font-size:12.5px;margin-bottom:12px}
+.infobar p{margin:0 0 8px}
+.infobar button{background:var(--blue)}
+.status{border-color:#D9C48F;background:#FBF7EC}
+.dnote{font-size:12.5px;color:var(--blue);margin:-4px 0 10px}
+.dnote:empty{display:none}
+.toast{position:fixed;left:14px;right:14px;bottom:calc(72px + env(safe-area-inset-bottom));z-index:80;max-width:532px;margin:0 auto;
+  background:var(--ink);color:#F4F5F2;padding:10px 14px;border-radius:10px;font-size:13.5px;
+  opacity:0;transform:translateY(8px);transition:opacity .2s ease,transform .2s ease;pointer-events:none}
+.toast.on{opacity:1;transform:none}
+@media (prefers-reduced-motion:reduce){.toast{transition:none}}
 </style>
 </head>
 <body>
@@ -155,6 +171,7 @@ hr.sep{border:none;border-top:1px solid var(--line);margin:14px 0}
 </nav>
 <div class="sheet-bg" id="sheetBg"></div>
 <div class="sheet" id="sheet"><div class="sheet-grab"></div><div id="sheetBody"></div></div>
+<div class="toast" id="toast" role="status" aria-live="polite"></div>
 
 <script>
 /* ---------- kalıcı depolama ---------- */
@@ -175,7 +192,7 @@ function save(){
 /* ---------- varsayılan yapı ---------- */
 function defaults(){
   return {
-    v:1,
+    v:2,
     splitH:60,
     incomes:[{n:'Maaş 1',a:0},{n:'Maaş 2',a:0},{n:'Diğer gelir',a:0}],
     fixed:[{n:'Kira',a:0},{n:'Aidat',a:0},{n:'Krediler',a:0}],
@@ -213,6 +230,10 @@ function defaults(){
       {id:'fon_hediye',n:'Hediye fonu',v:'Altın S.1 (İş Bankası)',src:'hediye',unit:'adet'},
       {id:'fon_artan',n:'Harcamadan artan',v:'XAU/USDT',src:'artan',unit:'ons'}
     ],
+    accounts:defaultAccounts(),
+    lastAcc:{h:'',y:''},
+    priceLog:[],
+    lastUsdAt:'',
     plans:{},
     expenses:[],
     invests:[],
@@ -222,8 +243,54 @@ function defaults(){
     curPeriod:null
   };
 }
-var S = load() || defaults();
-if(!S.v){S=defaults();}
+var DATA_V=2;
+function clone(o){return JSON.parse(JSON.stringify(o));}
+function defaultAccounts(){
+  return [
+    {id:'a_garanti',n:'Garanti Bonus',t:'kart'},
+    {id:'a_wings',n:'Wings',t:'kart'},
+    {id:'a_vakif',n:'Vakıf',t:'kart'},
+    {id:'a_kampus',n:'Kampüs Kart',t:'kart'},
+    {id:'a_paraf',n:'Paraf',t:'kart'},
+    {id:'a_isbank',n:'İş Bankası',t:'kart'},
+    {id:'a_ziraat',n:'Ziraat',t:'kart'},
+    {id:'a_ykb',n:'Yapı Kredi',t:'kart'}
+  ];
+}
+/* Eski sürüm verisini yeni alanlarla tamamlar. Hiçbir kaydı silmez.
+   Sürüm 1 verisinin ilk hali bir kez KEY+'_eski' anahtarına kopyalanır. */
+function migrate(d){
+  var eski=(d.v||1)<2;
+  if(eski && !memOnly){
+    try{ if(!localStorage.getItem(KEY+'_eski')) localStorage.setItem(KEY+'_eski',JSON.stringify(d)); }catch(e){}
+  }
+  if(!d.plans) d.plans={};
+  if(!d.expenses) d.expenses=[];
+  if(!d.invests) d.invests=[];
+  if(!d.prices) d.prices={};
+  if(!Array.isArray(d.accounts)) d.accounts=defaultAccounts();
+  if(!d.lastAcc) d.lastAcc={h:'',y:''};
+  if(!Array.isArray(d.priceLog)) d.priceLog=[];
+  if(d.lastUsdAt===undefined) d.lastUsdAt='';
+  if(eski){
+    /* Eski sürümde onay adımı yoktu. Kullanılmış dönemler onaylı sayılır. */
+    var tp=periodIdOf(today()), ust=(d.curPeriod&&d.curPeriod>tp)?d.curPeriod:tp;
+    Object.keys(d.plans).forEach(function(pid){
+      if(pid<=ust){ d.plans[pid].approved=true; if(!d.plans[pid].approvedAt) d.plans[pid].approvedAt=''; }
+    });
+  }
+  /* Birikim alt oranları artık her dönem planında ayrı saklanır. */
+  Object.keys(d.plans).forEach(function(pid){
+    var p=d.plans[pid];
+    if(!p.subs){ p.subs={}; (d.savingCats||[]).forEach(function(c){ p.subs[c.id]=clone(c.subs||[]); }); }
+  });
+  d.v=DATA_V;
+  return d;
+}
+var S = load();
+if(!S || !S.v) S=defaults();
+migrate(S);
+save();
 
 /* ---------- dönem hesabı ---------- */
 var AYLAR=['Ocak','Şubat','Mart','Nisan','Mayıs','Haziran','Temmuz','Ağustos','Eylül','Ekim','Kasım','Aralık'];
@@ -262,30 +329,43 @@ function getPlan(pid,create){
   var prevIds=Object.keys(S.plans).sort();
   var base=null;
   for(var i=prevIds.length-1;i>=0;i--){ if(prevIds[i]<pid){ base=S.plans[prevIds[i]]; break; } }
-  var p = base ? JSON.parse(JSON.stringify(base)) : {
+  var p = base ? clone(base) : {
     splitH:S.splitH,
-    incomes:JSON.parse(JSON.stringify(S.incomes)),
-    fixed:JSON.parse(JSON.stringify(S.fixed)),
+    incomes:clone(S.incomes),
+    fixed:clone(S.fixed),
     ec:S.expenseCats.map(function(c){return {id:c.id,p:c.p};}),
-    sc:S.savingCats.map(function(c){return {id:c.id,p:c.p};})
+    sc:S.savingCats.map(function(c){return {id:c.id,p:c.p};}),
+    subs:templateSubs()
   };
-  p.approved=false;
+  if(!p.subs) p.subs=templateSubs();
+  p.approved=false; p.approvedAt='';
   S.plans[pid]=p; save();
   return p;
+}
+function templateSubs(){ var o={}; S.savingCats.forEach(function(c){ o[c.id]=clone(c.subs||[]); }); return o; }
+/* Birikim alt oranları dönem planından okunur. Planda yoksa kategori şablonu kullanılır. */
+function planSubs(p,catId){
+  if(p && p.subs && p.subs[catId]) return p.subs[catId];
+  var m=savById(catId); return (m&&m.subs)||[];
+}
+function latestApproved(){
+  var ks=Object.keys(S.plans).filter(function(k){return S.plans[k].approved;}).sort();
+  return ks.length?ks[ks.length-1]:'';
 }
 function catById(id){ for(var i=0;i<S.expenseCats.length;i++) if(S.expenseCats[i].id===id) return S.expenseCats[i]; return null; }
 function savById(id){ for(var i=0;i<S.savingCats.length;i++) if(S.savingCats[i].id===id) return S.savingCats[i]; return null; }
 function fundById(id){ for(var i=0;i<S.funds.length;i++) if(S.funds[i].id===id) return S.funds[i]; return null; }
 function sum(arr,f){var t=0;for(var i=0;i<arr.length;i++)t+=(f?f(arr[i]):arr[i])||0;return t;}
-function planNums(pid){
-  var p=getPlan(pid,true);
+function numsOf(p){
   var gelir=sum(p.incomes,function(x){return +x.a;});
   var sabit=sum(p.fixed,function(x){return +x.a;});
   var kalan=gelir-sabit;
   var hb=kalan*p.splitH/100, bb=kalan*(100-p.splitH)/100;
   return {p:p,gelir:gelir,sabit:sabit,kalan:kalan,hb:hb,bb:bb};
 }
-
+function planNums(pid){ return numsOf(getPlan(pid,true)); }
+/* Raporlar için. Planı olmayan döneme plan açmaz, null döner. */
+function planNumsRO(pid){ return S.plans[pid]?numsOf(S.plans[pid]):null; }
 /* ---------- biçimlendirme ---------- */
 var nf0=new Intl.NumberFormat('tr-TR',{maximumFractionDigits:0});
 var nf2=new Intl.NumberFormat('tr-TR',{minimumFractionDigits:2,maximumFractionDigits:2});
@@ -298,6 +378,47 @@ function pct(n){return (Math.round((n||0)*10)/10)+'%';}
 function dshort(ds){var d=new Date(ds+'T12:00:00');return d.getDate()+' '+AYLAR[d.getMonth()].slice(0,3);}
 function esc(s){return (s==null?'':''+s).replace(/[&<>"]/g,function(c){return {'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;'}[c];});}
 
+function dlong(ds){var d=new Date(ds+'T12:00:00');return d.getDate()+' '+AYLAR[d.getMonth()];}
+function dfull(ds){var d=new Date(ds+'T12:00:00');return d.getDate()+' '+AYLAR[d.getMonth()]+' '+d.getFullYear();}
+function num2(n){return (Math.round((+n||0)*100)/100).toFixed(2).replace('.',',');}
+function signTl(n){return (n>0?'+':'')+tl(n);}
+function signUsd(n){return (n>0?'+':'')+usd(n);}
+function toast(msg){
+  var el=document.getElementById('toast'); if(!el)return;
+  el.textContent=msg; el.classList.add('on');
+  clearTimeout(toast.t); toast.t=setTimeout(function(){el.classList.remove('on');},3200);
+}
+function goPlan(pid){ getPlan(pid,true); S.curPeriod=pid; S.tab='plan'; save(); render(); }
+/* Girilen tarih görüntülenen dönemin dışındaysa kaydın hangi döneme yazılacağını söyler. */
+function dateNote(inputId,noteId){
+  var i=document.getElementById(inputId), o=document.getElementById(noteId); if(!i||!o)return;
+  var pid=periodIdOf(i.value||today());
+  if(pid===curPid()){ o.textContent=''; return; }
+  var pl=S.plans[pid];
+  o.textContent='Bu kayıt '+periodInfo(pid).label+' dönemine yazılacak.'+((pl&&pl.approved)?'':' Bu dönemin planı henüz onaylanmadı.');
+}
+function savedNote(dateStr,what){
+  var pid=periodIdOf(dateStr);
+  toast(pid===curPid() ? what+' kaydedildi.' : what+' '+periodInfo(pid).label+' dönemine kaydedildi.');
+}
+/* ---------- kartlar ve hesaplar ---------- */
+function accById(id){ for(var i=0;i<S.accounts.length;i++) if(S.accounts[i].id===id) return S.accounts[i]; return null; }
+function accName(id){ if(!id) return 'Belirtilmedi'; var a=accById(id); return a?a.n:'Kaldırılmış hesap'; }
+function accUse(id){
+  return S.expenses.filter(function(e){return e.acc===id;}).length+S.invests.filter(function(i){return i.acc===id;}).length;
+}
+function accOptions(sel){
+  var h='<option value="">Belirtilmedi</option>';
+  [['kart','Kredi kartları'],['hesap','Hesaplar']].forEach(function(g){
+    var list=S.accounts.filter(function(a){return a.t===g[0] && (!a.off || a.id===sel);});
+    if(!list.length) return;
+    h+='<optgroup label="'+g[1]+'">'+list.map(function(a){
+      return '<option value="'+a.id+'"'+(a.id===sel?' selected':'')+'>'+esc(a.n)+(a.off?' (kaldırıldı)':'')+'</option>';
+    }).join('')+'</optgroup>';
+  });
+  if(sel && !accById(sel)) h+='<option value="'+esc(sel)+'" selected>Kaldırılmış hesap</option>';
+  return h;
+}
 /* ---------- toplamlar ---------- */
 function expensesOf(pid){return S.expenses.filter(function(e){return periodIdOf(e.date)===pid;});}
 function spentByCat(pid){
@@ -393,13 +514,21 @@ function cumSeries(list,valFn){
 
 /* ---------- ana çizim ---------- */
 function drawBanner(){
-  var el=document.getElementById('banner');
-  el.innerHTML = memOnly
-    ? '<div class="warnbar">Bu ortamda tarayıcı depolaması kapalı. Girdiğiniz veriler sayfa kapanınca silinir. Dosyayı telefonunuzda Safari ile açtığınızda veriler kalıcı olur.</div>'
-    : '';
+  var el=document.getElementById('banner'), h='';
+  if(memOnly) h+='<div class="warnbar">Bu ortamda tarayıcı depolaması kapalı. Girdiğiniz veriler sayfa kapanınca silinir. Dosyayı telefonunuzda Safari ile açtığınızda veriler kalıcı olur.</div>';
+  /* Uygulama kendiliğinden yeni döneme geçmez. Takvimde yeni dönem başladıysa ve
+     planı onaylanmadıysa yalnızca haber verir. */
+  var tp=periodIdOf(today()), pl=S.plans[tp];
+  if(S.tab==='plan' && curPid()!==tp && !(pl&&pl.approved) && tp>latestApproved()){
+    var inf=periodInfo(tp);
+    h+='<div class="infobar"><p>Takvimde '+inf.label+' dönemi '+dlong(inf.start)+' günü başladı ama planı henüz onaylanmadı. Bu tarihten sonraki kayıtlar '+inf.label+' dönemine yazılır.</p>'+
+       '<button class="slim" onclick="goPlan(\''+tp+'\')">'+inf.label+' planını aç</button></div>';
+  }
+  el.innerHTML=h;
 }
 function drawHeader(){
-  var pid=curPid(), info=periodInfo(pid);
+  var pid=curPid(), info=periodInfo(pid), pl=S.plans[pid];
+  document.getElementById('hdTitle').textContent=(pl&&!pl.approved)?'Taslak plan':'Dönem bütçesi';
   document.getElementById('hdPeriod').textContent=info.label+' bütçesi';
   document.getElementById('hdDates').textContent=info.dates;
   var ids={};
@@ -410,10 +539,12 @@ function drawHeader(){
   var list=Object.keys(ids).sort().reverse();
   var sel=document.getElementById('periodSel');
   sel.innerHTML=list.map(function(k){
-    return '<option value="'+k+'"'+(k===pid?' selected':'')+'>'+periodInfo(k).label+'</option>';
+    var d=S.plans[k]&&!S.plans[k].approved;
+    return '<option value="'+k+'"'+(k===pid?' selected':'')+'>'+periodInfo(k).label+(d?' (taslak)':'')+'</option>';
   }).join('');
 }
 function render(){
+  getPlan(curPid(),true);
   drawBanner(); drawHeader();
   document.querySelectorAll('#nav button').forEach(function(b){b.classList.toggle('on',b.dataset.tab===S.tab);});
   var v=document.getElementById('view');
@@ -428,13 +559,18 @@ var lastSig='';
 
 /* =====================  PLANLAMA  ===================== */
 function viewPlan(){
-  var pid=curPid(), n=planNums(pid), p=n.p;
+  var pid=curPid(), n=planNums(pid), p=n.p, lbl=periodInfo(pid).label;
   var spent=spentByCat(pid), invA=investedByCat(pid,'uzun');
   var toplamHarcama=sum(Object.keys(spent),function(k){return spent[k];});
   var toplamYatirim=sum(Object.keys(invA),function(k){return invA[k];});
   var ecSum=sum(p.ec,function(c){return +c.p;}), scSum=sum(p.sc,function(c){return +c.p;});
 
   var h='';
+  if(!p.approved){
+    h+='<div class="card status"><h2>'+lbl+' planı taslak</h2>';
+    h+='<p class="sub">Gelir, sabit gider ve oranları kontrol edin. Onayladığınızda dönem başlar ve uygulama bu dönemle açılır.</p>';
+    h+='<button class="wide" onclick="approvePlan()">Planı onayla ve dönemi başlat</button></div>';
+  }
   h+='<div class="card">';
   h+='<div class="between"><div><p class="lbl">Harcama ve birikim bütçesi</p><p class="big">'+tl(n.kalan)+'</p></div>';
   h+='<div style="text-align:right"><p class="lbl">Gelir '+tl(n.gelir)+'</p><p class="lbl">Sabit gider '+tl(n.sabit)+'</p></div></div>';
@@ -466,12 +602,12 @@ function viewPlan(){
   var scs=p.sc.slice().sort(function(a,b){return b.p-a.p;});
   scs.forEach(function(c){
     var meta=savById(c.id); if(!meta)return;
-    var lim=n.bb*c.p/100, kul=invA[c.id]||0;
+    var lim=n.bb*c.p/100, kul=invA[c.id]||0, subs=planSubs(p,meta.id);
     h+='<div class="catrow"><div class="between"><span class="catname">'+esc(meta.n)+' <span class="tag y">%'+nf2.format(c.p).replace(',00','')+'</span></span>';
     h+='<span class="catnums">'+tl(kul)+' / '+tl(lim)+'</span></div>'+barHtml(kul,lim,true);
-    if(meta.subs&&meta.subs.length){
-      var st=sum(meta.subs,function(s){return +s.p;});
-      h+='<p class="lbl" style="margin-top:4px">'+meta.subs.map(function(s){return esc(s.n)+' '+tl(lim*s.p/100);}).join(' · ')+'</p>';
+    if(subs.length){
+      var st=sum(subs,function(s){return +s.p;});
+      h+='<p class="lbl" style="margin-top:4px">'+subs.map(function(s){return esc(s.n)+' '+tl(lim*s.p/100);}).join(' · ')+'</p>';
       h+='<div class="between" style="margin-top:3px"><span class="lbl'+(Math.abs(st-100)>0.05?' neg':'')+'">Alt kalem toplamı %'+nf2.format(st).replace(',00','')+
          (Math.abs(st-100)>0.05?' · '+tl(lim*st/100)+' dağıtılıyor, limit '+tl(lim):'')+'</span>'+
          '<button class="ghost slim" onclick="editSubs(\''+meta.id+'\')">Alt oranlar</button></div>';
@@ -495,8 +631,18 @@ function viewPlan(){
   });
   h+='</div>';
 
-  h+='<div class="card"><h2>Sonraki dönem</h2><p class="sub">'+periodInfo(shiftPeriod(pid,1)).label+' bütçesini bu dönemin oranlarıyla açar.</p>';
-  h+='<button class="wide ghost" onclick="nextPeriod()">'+periodInfo(shiftPeriod(pid,1)).label+' planını aç</button></div>';
+  var np=shiftPeriod(pid,1), npl=S.plans[np], nl=periodInfo(np).label;
+  h+='<div class="card"><h2>Sonraki dönem</h2>';
+  if(!npl){
+    h+='<p class="sub">'+nl+' planını bu dönemin gelir, gider ve oranlarıyla taslak olarak açar. Siz onaylayana kadar dönem başlamaz.</p>';
+    h+='<button class="wide ghost" onclick="nextPeriod()">'+nl+' planını hazırla</button></div>';
+  } else if(!npl.approved){
+    h+='<p class="sub">'+nl+' taslağı hazır, henüz onaylanmadı.</p>';
+    h+='<button class="wide ghost" onclick="goPlan(\''+np+'\')">'+nl+' taslağını aç</button></div>';
+  } else {
+    h+='<p class="sub">'+nl+' planı onaylı.</p>';
+    h+='<button class="wide ghost" onclick="goPlan(\''+np+'\')">'+nl+' dönemine git</button></div>';
+  }
   return h;
 }
 function barHtml(used,limit,gold){
@@ -506,9 +652,27 @@ function barHtml(used,limit,gold){
   if(gold && r>=1) cls='';
   return '<div class="bar"><i class="'+cls+'" style="width:'+w.toFixed(1)+'%"></i></div>';
 }
-function nextPeriod(){
-  var np=shiftPeriod(curPid(),1);
-  getPlan(np,true); S.curPeriod=np; save(); render();
+function nextPeriod(){ goPlan(shiftPeriod(curPid(),1)); }
+/* Onaydan önce planın tutarlı olup olmadığını denetler. */
+function planProblems(pid){
+  var n=planNums(pid), p=n.p, out=[];
+  if(n.kalan<=0) out.push('Gelir girilmemiş ya da sabit giderler geliri aşıyor.');
+  var ec=sum(p.ec,function(c){return +c.p;}), sc=sum(p.sc,function(c){return +c.p;});
+  if(Math.abs(ec-100)>0.05) out.push('Harcama oranlarının toplamı %'+nf2.format(ec)+'. 100 olmalı.');
+  if(Math.abs(sc-100)>0.05) out.push('Birikim oranlarının toplamı %'+nf2.format(sc)+'. 100 olmalı.');
+  p.sc.forEach(function(c){
+    var m=savById(c.id), subs=planSubs(p,c.id); if(!m||!subs.length) return;
+    var st=sum(subs,function(s){return +s.p;});
+    if(Math.abs(st-100)>0.05) out.push(m.n+' alt oranlarının toplamı %'+nf2.format(st)+'. 100 olmalı.');
+  });
+  return out;
+}
+function approvePlan(){
+  var pid=curPid(), lbl=periodInfo(pid).label, probs=planProblems(pid);
+  if(probs.length){ alert('Plan onaylanamadı.\n\n'+probs.join('\n')); return; }
+  if(!confirm(lbl+' planı onaylansın mı? Dönem başlar ve uygulama bu dönemle açılır.')) return;
+  var p=getPlan(pid,true); p.approved=true; p.approvedAt=today();
+  S.curPeriod=pid; save(); render(); toast(lbl+' dönemi başladı.');
 }
 function editGelir(){
   var p=getPlan(curPid(),true);
@@ -564,9 +728,9 @@ function editSubs(catId){
   var n=planNums(curPid()), pc=n.p.sc.filter(function(x){return x.id===catId;})[0];
   var lim=pc?n.bb*pc.p/100:0;
   var h='<h2>'+esc(m.n)+' alt oranları</h2>';
-  h+='<p class="sub">Toplam 100 olmalı. Bu dönemde '+esc(m.n)+' için ayrılan tutar '+tl(lim)+'.</p>';
+  h+='<p class="sub">Toplam 100 olmalı. Bu dönemde '+esc(m.n)+' için ayrılan tutar '+tl(lim)+'. Değişiklik bu dönemden itibaren geçerli olur. Geçmiş dönemler değişmez.</p>';
   h+='<div id="sbList">';
-  (m.subs||[]).forEach(function(s){ h+=subRow(s.n,s.p); });
+  planSubs(n.p,catId).forEach(function(s){ h+=subRow(s.n,s.p); });
   h+='</div>';
   h+='<div class="row" style="margin-top:6px"><button class="ghost slim" onclick="addSubRow()">Alt kalem ekle</button>'+
      '<button class="ghost slim" onclick="spreadSubs()">Eşit dağıt</button></div>';
@@ -622,7 +786,13 @@ function saveSubs(catId){
     if(!nm)return;
     out.push({n:nm,p:parseFloat(r.querySelector('[data-f=p]').value)||0});
   });
-  m.subs=out;
+  var cp=curPid(); getPlan(cp,true);
+  Object.keys(S.plans).forEach(function(k){
+    if(k<cp) return;
+    var pl=S.plans[k]; if(!pl.subs) pl.subs={};
+    pl.subs[catId]=clone(out);
+  });
+  m.subs=clone(out);
   save(); closeSheet(); render();
 }
 function editCats(kind){
@@ -664,7 +834,8 @@ function viewHarcama(){
 
   if(subTab.harcama==='gir'){
     h+='<div class="card"><h2>Yeni kayıt</h2>';
-    h+='<label class="f"><span>Tarih</span><input type="date" id="exDate" value="'+today()+'"></label>';
+    h+='<label class="f"><span>Tarih</span><input type="date" id="exDate" value="'+today()+'" onchange="dateNote(\'exDate\',\'exDateNote\')"></label>';
+    h+='<p class="dnote" id="exDateNote"></p>';
     h+='<label class="f"><span>Kategori</span><select id="exCat" onchange="fillSub()">'+
         p.ec.map(function(c){var m=catById(c.id);return m?'<option value="'+c.id+'">'+esc(m.n)+'</option>':'';}).join('')+'</select></label>';
     h+='<label class="f" id="exSubWrap"><span>Alt kalem</span><select id="exSub"></select></label>';
@@ -672,6 +843,7 @@ function viewHarcama(){
        '<option value="harcama">Harcama</option><option value="iade">İade / geri ödeme</option></select></label>';
     h+='<label class="f"><span>Tutar (₺)</span><input type="number" inputmode="decimal" id="exAmt" placeholder="0"></label></div>';
     h+='<p class="sub" style="margin:-4px 0 10px">İade seçilirse tutar kategoriden düşülür. Eksi işareti yazmanıza gerek yok.</p>';
+    h+='<label class="f"><span>Kart / hesap</span><select id="exAcc">'+accOptions(S.lastAcc.h)+'</select></label>';
     h+='<label class="f"><span>Not</span><input type="text" id="exNote" placeholder="İsteğe bağlı"></label>';
     h+='<button class="wide" id="exBtn" onclick="addExpense()">Harcamayı kaydet</button></div>';
 
@@ -685,25 +857,53 @@ function viewHarcama(){
     });
     if(!Object.keys(spent).length) h+='<div class="empty">Bu dönemde henüz harcama yok. İlk kaydı yukarıdan girin.</div>';
     h+='</div>';
-    setTimeout(fillSub,0);
+    setTimeout(function(){ fillSub(); dateNote('exDate','exDateNote'); },0);
   }
 
   if(subTab.harcama==='liste'){
-    var list=expensesOf(pid).sort(function(a,b){return a.date<b.date?1:-1;});
+    var all=expensesOf(pid);
+    var list=all.filter(function(e){
+      return (lf.acc==='*' || (e.acc||'')===lf.acc) && (lf.cat==='*' || e.cat===lf.cat);
+    }).sort(function(a,b){return a.date<b.date?1:-1;});
+    var filtreli=(lf.acc!=='*'||lf.cat!=='*');
+    h+='<div class="card"><div class="grid2">';
+    h+='<label class="f" style="margin:0"><span>Kart / hesap</span><select onchange="setLf(\'acc\',this.value)">'+filterAccOptions(all,lf.acc)+'</select></label>';
+    h+='<label class="f" style="margin:0"><span>Kategori</span><select onchange="setLf(\'cat\',this.value)">'+filterCatOptions(all,lf.cat)+'</select></label>';
+    h+='</div></div>';
     h+='<div class="card"><div class="between"><h2>'+periodInfo(pid).label+' kayıtları</h2><span class="tag">'+list.length+' kayıt</span></div>';
-    if(!list.length) h+='<div class="empty">Kayıt yok.</div>';
+    if(!list.length) h+='<div class="empty">'+(filtreli?'Bu filtreye uyan kayıt yok.':'Kayıt yok.')+'</div>';
     list.forEach(function(e){
       var m=catById(e.cat), ia=e.amount<0;
+      var alt=[e.sub, e.acc?accName(e.acc):'', e.note].filter(Boolean).join(' · ');
       h+='<div class="item"><div class="d">'+dshort(e.date)+'</div><div class="t"><b>'+esc(m?m.n:e.cat)+(ia?' <span class="tag g">iade</span>':'')+'</b>'+
-         '<small>'+esc([e.sub,e.note].filter(Boolean).join(' · ')||'—')+'</small></div>'+
+         '<small>'+esc(alt||'—')+'</small></div>'+
          '<div class="a'+(ia?' pos':'')+'">'+tl(e.amount)+'<br><button class="ghost slim" style="margin-top:4px" onclick="editExpense(\''+e.id+'\')">Düzenle</button></div></div>';
     });
-    h+='<hr class="sep"><div class="between"><span class="lbl">Dönem toplamı</span><span class="mid">'+tl(sum(list,function(x){return +x.amount;}))+'</span></div></div>';
+    h+='<hr class="sep"><div class="between"><span class="lbl">'+(filtreli?'Filtrelenen toplam':'Dönem toplamı')+'</span><span class="mid">'+tl(sum(list,function(x){return +x.amount;}))+'</span></div></div>';
   }
 
   if(subTab.harcama==='rapor'){
     h+=expenseReport();
   }
+  return h;
+}
+var lf={acc:'*',cat:'*'};
+function setLf(k,v){ lf[k]=v; render(); }
+function filterAccOptions(list,sel){
+  var used={}; list.forEach(function(e){ used[e.acc||'']=1; });
+  var h='<option value="*">Tümü</option><option value=""'+(sel===''?' selected':'')+'>Belirtilmedi</option>';
+  S.accounts.forEach(function(a){
+    if(a.off && !used[a.id]) return;
+    h+='<option value="'+a.id+'"'+(a.id===sel?' selected':'')+'>'+esc(a.n)+'</option>';
+  });
+  Object.keys(used).forEach(function(k){ if(k && !accById(k)) h+='<option value="'+esc(k)+'"'+(k===sel?' selected':'')+'>Kaldırılmış hesap</option>'; });
+  return h;
+}
+function filterCatOptions(list,sel){
+  var used={}; list.forEach(function(e){ used[e.cat]=1; });
+  var h='<option value="*">Tümü</option>';
+  S.expenseCats.forEach(function(c){ h+='<option value="'+c.id+'"'+(c.id===sel?' selected':'')+'>'+esc(c.n)+'</option>'; });
+  Object.keys(used).forEach(function(k){ if(!catById(k)) h+='<option value="'+esc(k)+'"'+(k===sel?' selected':'')+'>Silinmiş kategori</option>'; });
   return h;
 }
 function setSub(tab,val){ subTab[tab]=val; render(); }
@@ -723,28 +923,34 @@ function addExpense(){
   if(!a||a<=0){ alert('Tutar girin.'); return; }
   var subEl=document.getElementById('exSub');
   var t=document.getElementById('exType').value;
+  var acc=document.getElementById('exAcc').value;
+  var d=document.getElementById('exDate').value||today();
   S.expenses.push({
     id:'e'+Date.now()+Math.random().toString(36).slice(2,6),
-    date:document.getElementById('exDate').value||today(),
+    date:d,
     cat:document.getElementById('exCat').value,
     sub:subEl?subEl.value:'',
     amount:t==='iade'?-a:a,
+    acc:acc,
     note:document.getElementById('exNote').value.trim()
   });
-  save(); render();
+  S.lastAcc.h=acc;
+  save(); render(); savedNote(d, t==='iade'?'İade':'Harcama');
 }
 function editExpense(id){
   var e=S.expenses.filter(function(x){return x.id===id;})[0]; if(!e)return;
   var p=getPlan(curPid(),true);
+  var catOpts=p.ec.map(function(c){var m=catById(c.id);return m?'<option value="'+c.id+'"'+(c.id===e.cat?' selected':'')+'>'+esc(m.n)+'</option>':'';}).join('');
+  if(!p.ec.some(function(c){return c.id===e.cat && catById(c.id);})) catOpts+='<option value="'+esc(e.cat)+'" selected>'+esc(catById(e.cat)?catById(e.cat).n:'Silinmiş kategori')+'</option>';
   var h='<h2>Harcamayı düzenle</h2>';
   h+='<label class="f"><span>Tarih</span><input type="date" id="edDate" value="'+e.date+'"></label>';
-  h+='<label class="f"><span>Kategori</span><select id="edCat">'+
-      p.ec.map(function(c){var m=catById(c.id);return m?'<option value="'+c.id+'"'+(c.id===e.cat?' selected':'')+'>'+esc(m.n)+'</option>':'';}).join('')+'</select></label>';
+  h+='<label class="f"><span>Kategori</span><select id="edCat">'+catOpts+'</select></label>';
   h+='<label class="f"><span>Alt kalem</span><input type="text" id="edSub" value="'+esc(e.sub)+'"></label>';
   h+='<div class="grid2"><label class="f"><span>Kayıt türü</span><select id="edType">'+
      '<option value="harcama"'+(e.amount>=0?' selected':'')+'>Harcama</option>'+
      '<option value="iade"'+(e.amount<0?' selected':'')+'>İade / geri ödeme</option></select></label>';
   h+='<label class="f"><span>Tutar (₺)</span><input type="number" inputmode="decimal" id="edAmt" value="'+Math.abs(e.amount)+'"></label></div>';
+  h+='<label class="f"><span>Kart / hesap</span><select id="edAcc">'+accOptions(e.acc||'')+'</select></label>';
   h+='<label class="f"><span>Not</span><input type="text" id="edNote" value="'+esc(e.note)+'"></label>';
   h+='<div class="row" style="margin-top:12px"><button class="danger" onclick="delExpense(\''+id+'\')">Sil</button>'+
      '<button class="ghost grow" onclick="closeSheet()">Vazgeç</button><button class="grow" onclick="saveExpense(\''+id+'\')">Kaydet</button></div>';
@@ -752,11 +958,12 @@ function editExpense(id){
 }
 function saveExpense(id){
   var e=S.expenses.filter(function(x){return x.id===id;})[0]; if(!e)return;
-  e.date=document.getElementById('edDate').value;
+  e.date=document.getElementById('edDate').value||e.date;
   e.cat=document.getElementById('edCat').value;
   e.sub=document.getElementById('edSub').value.trim();
   var ea=Math.abs(parseFloat(document.getElementById('edAmt').value)||0);
   e.amount=document.getElementById('edType').value==='iade'?-ea:ea;
+  e.acc=document.getElementById('edAcc').value;
   e.note=document.getElementById('edNote').value.trim();
   save(); closeSheet(); render();
 }
@@ -766,53 +973,132 @@ function delExpense(id){
   save(); closeSheet(); render();
 }
 function expenseReport(){
-  var pid=curPid();
-  var h=budgetScorecard()+catScorecard()+yearScorecard();
-  var pids=Object.keys(S.plans).sort();
-  if(pids.indexOf(pid)<0) pids.push(pid);
-  pids=pids.sort().slice(-12);
-  h+='<div class="card"><h2>Dönem karşılaştırması</h2><p class="sub">Son dönemlerin toplam harcaması.</p>';
-  var pts=pids.map(function(k){
-    var t=sum(expensesOf(k),function(e){return +e.amount;});
-    return {x:new Date(periodInfo(k).end+'T12:00:00').getTime(),y:t,k:k};
+  var R=rangeOf('h');
+  var list=S.expenses.filter(function(e){return inRange(e.date,R);});
+  var h=rangeSel('h',R);
+  h+=expSummary(list,R)+expCatCard(list,R)+accountCard(R);
+  if(!R.ozel && R.pids.length>1) h+=periodCompare(R);
+  h+=catHistCard();
+  h+=budgetScorecard()+catScorecard()+yearScorecard();
+  return h;
+}
+function rangeLimits(R){
+  var o={hb:0,bb:0,planli:0,eksik:0,ec:{},sc:{}};
+  if(R.ozel) return o;
+  R.pids.forEach(function(k){
+    var nn=planNumsRO(k);
+    if(!nn){ o.eksik++; return; }
+    o.planli++; o.hb+=nn.hb; o.bb+=nn.bb;
+    nn.p.ec.forEach(function(c){ o.ec[c.id]=(o.ec[c.id]||0)+nn.hb*c.p/100; });
+    nn.p.sc.forEach(function(c){ o.sc[c.id]=(o.sc[c.id]||0)+nn.bb*c.p/100; });
   });
-  h+=lineChart([{color:'#A23A30',pts:pts}],tl);
-  h+='<div class="legend"><span><s style="background:#A23A30"></s>Toplam harcama</span></div>';
-  pids.slice().reverse().forEach(function(k){
+  return o;
+}
+function expSummary(list,R){
+  var tot=sum(list,function(e){return +e.amount;});
+  var iade=sum(list.filter(function(e){return e.amount<0;}),function(e){return -e.amount;});
+  var L=rangeLimits(R);
+  var h='<div class="card"><h2>Özet</h2><div class="stat2">';
+  h+='<div><p class="lbl">Harcama</p><p class="mid">'+tl(tot)+'</p></div>';
+  if(!R.ozel){
+    h+='<div><p class="lbl">Bütçe</p><p class="mid">'+tl(L.hb)+'</p></div>';
+    h+='<div><p class="lbl">Fark</p><p class="mid '+(tot-L.hb>0?'neg':'pos')+'">'+signTl(tot-L.hb)+'</p></div>';
+    h+='<div><p class="lbl">Dönem başına</p><p class="mid">'+tl(tot/Math.max(1,R.pids.length))+'</p></div>';
+  }
+  h+='<div><p class="lbl">Kayıt</p><p class="mid">'+list.length+'</p></div>';
+  h+='<div><p class="lbl">İade</p><p class="mid pos">'+tl(iade)+'</p></div>';
+  h+='</div>';
+  if(!R.ozel) h+=barHtml(tot,L.hb);
+  if(L.eksik) h+='<p class="lbl" style="margin-top:6px">'+L.eksik+' dönemin planı yok, bütçe toplamına girmedi.</p>';
+  if(R.ozel) h+='<p class="lbl" style="margin-top:6px">Tarih aralığında dönemler bölünebildiği için bütçe karşılaştırması yapılmaz.</p>';
+  if(!R.ozel && R.pids.indexOf(periodIdOf(today()))>=0) h+='<p class="lbl" style="margin-top:6px">Süren dönemin bütçesi tam sayılıyor, harcaması henüz tamamlanmadı.</p>';
+  h+='</div>';
+  return h;
+}
+function expCatCard(list,R){
+  var by={}, subBy={}, L=rangeLimits(R);
+  list.forEach(function(e){
+    by[e.cat]=(by[e.cat]||0)+(+e.amount||0);
+    var s=e.sub||'Alt kalemsiz';
+    if(!subBy[e.cat]) subBy[e.cat]={};
+    subBy[e.cat][s]=(subBy[e.cat][s]||0)+(+e.amount||0);
+  });
+  var tot=0; Object.keys(by).forEach(function(k){tot+=by[k];});
+  var ids={}; Object.keys(by).forEach(function(k){ids[k]=1;}); Object.keys(L.ec).forEach(function(k){ if(L.ec[k]>0) ids[k]=1; });
+  var bos=Object.keys(ids).filter(function(k){return !by[k];});
+  var keys=Object.keys(ids).filter(function(k){return !!by[k];}).sort(function(a,b){return (by[b]||0)-(by[a]||0);});
+  var h='<div class="card"><h2>Kategori dağılımı</h2><p class="sub">Aralıktaki harcamanın kategorilere dağılımı'+(R.ozel?'.':' ve aralık boyunca planlanan limitler.')+'</p>';
+  if(!keys.length) return h+'<div class="empty">Bu aralıkta harcama yok.</div></div>';
+  keys.forEach(function(k){
+    var sp=by[k]||0, lim=L.ec[k]||0, m=catById(k);
+    h+='<div class="catrow"><div class="between"><span class="catname">'+esc(m?m.n:'Silinmiş kategori')+'</span>'+
+       '<span class="catnums">'+tl(sp)+(R.ozel?'':' / '+tl(lim))+'</span></div>';
+    h+=R.ozel? barHtml(sp,tot,true) : barHtml(sp,lim);
+    h+='<div class="between" style="margin-top:4px"><span class="lbl">Toplamın '+(tot?pct(sp/tot*100):'—')+'</span>'+
+       (R.ozel?'':'<span class="lbl'+(sp>lim?' neg':'')+'">'+(lim>0?pct(sp/lim*100)+' kullanıldı':'Limit yok')+'</span>')+'</div>';
+    var sb=subBy[k]||{}, sk=Object.keys(sb).sort(function(a,b){return sb[b]-sb[a];});
+    if(sk.length>1 || (sk.length===1 && sk[0]!=='Alt kalemsiz')){
+      h+='<p class="lbl" style="margin-top:3px">'+sk.map(function(s){return esc(s)+' '+tl(sb[s]);}).join(' · ')+'</p>';
+    }
+    h+='</div>';
+  });
+  if(bos.length) h+='<p class="lbl" style="margin-top:8px">Harcama olmayan kategoriler '+bos.map(function(k){var m=catById(k);return esc(m?m.n:k);}).join(', ')+'</p>';
+  h+='</div>';
+  return h;
+}
+function periodCompare(R){
+  var h='<div class="card"><h2>Dönem karşılaştırması</h2><p class="sub">Aralıktaki dönemlerin toplam harcaması ve bütçesi.</p>';
+  var pts=R.pids.map(function(k){
     var t=sum(expensesOf(k),function(e){return +e.amount;});
-    var nn=planNums(k);
-    h+='<div class="catrow"><div class="between"><span class="catname">'+periodInfo(k).label+'</span><span class="catnums">'+tl(t)+' / '+tl(nn.hb)+'</span></div>'+barHtml(t,nn.hb)+'</div>';
+    return {x:new Date(periodInfo(k).end+'T12:00:00').getTime(),y:t};
+  });
+  var bud=[]; R.pids.forEach(function(k){ var nn=planNumsRO(k); if(nn) bud.push({x:new Date(periodInfo(k).end+'T12:00:00').getTime(),y:nn.hb}); });
+  h+=lineChart([{color:'#A23A30',pts:pts}].concat(bud.length>1?[{color:'#9AA8A2',pts:bud}]:[]),tl);
+  h+='<div class="legend"><span><s style="background:#A23A30"></s>Harcama</span>'+(bud.length>1?'<span><s style="background:#9AA8A2"></s>Bütçe</span>':'')+'</div>';
+  R.pids.slice().reverse().forEach(function(k){
+    var t=sum(expensesOf(k),function(e){return +e.amount;}), nn=planNumsRO(k);
+    h+='<div class="catrow"><div class="between"><span class="catname">'+periodInfo(k).label+'</span><span class="catnums">'+tl(t)+' / '+(nn?tl(nn.hb):'plan yok')+'</span></div>'+barHtml(t,nn?nn.hb:0)+'</div>';
   });
   h+='</div>';
-
-  h+='<div class="card"><h2>Kategori geçmişi</h2><p class="sub">Bir kategoriyi seçin, dönemler arası değişimi görün.</p>';
-  h+='<label class="f"><select id="repCat" onchange="drawCatHist()">'+
-     S.expenseCats.map(function(c){return '<option value="'+c.id+'">'+esc(c.n)+'</option>';}).join('')+'</select></label>';
+  return h;
+}
+var repCatSel='';
+function catHistCard(){
+  if(!repCatSel || !catById(repCatSel)) repCatSel=(S.expenseCats[0]||{}).id||'';
+  var h='<div class="card"><h2>Kategori geçmişi</h2><p class="sub">Bir kategoriyi seçin, aralıktaki dönemler arası değişimi ve alt kalemlerini görün.</p>';
+  h+='<label class="f"><select id="repCat" onchange="repCatSel=this.value;drawCatHist()">'+
+     S.expenseCats.map(function(c){return '<option value="'+c.id+'"'+(c.id===repCatSel?' selected':'')+'>'+esc(c.n)+'</option>';}).join('')+'</select></label>';
   h+='<div id="catHist"></div></div>';
   setTimeout(drawCatHist,0);
   return h;
 }
 function drawCatHist(){
   var box=document.getElementById('catHist'); if(!box)return;
-  var id=document.getElementById('repCat').value;
-  var pids=Object.keys(S.plans).sort().slice(-12);
-  if(!pids.length) pids=[curPid()];
-  var pts=pids.map(function(k){
-    var t=sum(expensesOf(k).filter(function(e){return e.cat===id;}),function(e){return +e.amount;});
-    return {x:new Date(periodInfo(k).end+'T12:00:00').getTime(),y:t};
+  var id=document.getElementById('repCat').value, R=rangeOf('h');
+  var sel=S.expenses.filter(function(e){return e.cat===id && inRange(e.date,R);});
+  var rows=R.pids.map(function(k){
+    var t=sum(sel.filter(function(e){return periodIdOf(e.date)===k;}),function(e){return +e.amount;});
+    var nn=planNumsRO(k), pc=nn?nn.p.ec.filter(function(c){return c.id===id;})[0]:null;
+    return {k:k,t:t,lim:(nn&&pc)?nn.hb*pc.p/100:0,plan:!!nn};
   });
-  var h=lineChart([{color:'#2C5673',pts:pts}],tl);
-  h+='<table class="hold"><tr><th>Dönem</th><th>Harcama</th><th>Limit</th><th>Kullanım</th></tr>';
-  pids.slice().reverse().forEach(function(k){
-    var nn=planNums(k), pc=nn.p.ec.filter(function(c){return c.id===id;})[0];
-    var lim=pc?nn.hb*pc.p/100:0;
-    var t=sum(expensesOf(k).filter(function(e){return e.cat===id;}),function(e){return +e.amount;});
-    h+='<tr><td>'+periodInfo(k).label+'</td><td>'+tl(t)+'</td><td>'+tl(lim)+'</td><td class="'+(lim&&t>lim?'neg':'')+'">'+(lim?pct(t/lim*100):'—')+'</td></tr>';
+  var h=lineChart([{color:'#2C5673',pts:rows.map(function(r){return {x:new Date(periodInfo(r.k).end+'T12:00:00').getTime(),y:r.t};})}],tl);
+  var tot=sum(rows,function(r){return r.t;});
+  h+='<p class="lbl" style="margin-top:6px">Aralık toplamı '+tl(tot)+', dönem başına '+tl(tot/Math.max(1,rows.length))+'</p>';
+  h+='<div class="scroll"><table class="hold"><tr><th>Dönem</th><th>Harcama</th><th>Limit</th><th>Kullanım</th></tr>';
+  rows.slice().reverse().forEach(function(r){
+    h+='<tr><td>'+periodInfo(r.k).label+'</td><td>'+tl(r.t)+'</td><td>'+(r.plan?tl(r.lim):'—')+'</td><td class="'+(r.lim&&r.t>r.lim?'neg':'')+'">'+(r.lim?pct(r.t/r.lim*100):'—')+'</td></tr>';
   });
-  h+='</table>';
+  h+='</table></div>';
+  var sb={}; sel.forEach(function(e){ var s=e.sub||'Alt kalemsiz'; sb[s]=(sb[s]||0)+(+e.amount||0); });
+  var sk=Object.keys(sb).sort(function(a,b){return sb[b]-sb[a];});
+  if(sk.length){
+    h+='<h3>Alt kalemler</h3>';
+    sk.forEach(function(s){
+      h+='<div class="catrow"><div class="between"><span class="catname">'+esc(s)+'</span><span class="catnums">'+tl(sb[s])+' · '+(tot?pct(sb[s]/tot*100):'—')+'</span></div>'+barHtml(sb[s],tot,true)+'</div>';
+    });
+  }
   box.innerHTML=h;
 }
-
 /* =====================  YATIRIMLAR  ===================== */
 function viewYatirim(){
   var h='<div class="tabs">';
@@ -827,7 +1113,7 @@ function viewYatirim(){
 function investPane(bucket){
   var pid=curPid(), n=planNums(pid);
   var cats = bucket==='uzun'
-    ? n.p.sc.map(function(c){var m=savById(c.id);return m?{id:m.id,n:m.n,unit:m.unit,subs:(m.subs||[]).map(function(s){return s.n;}),limit:n.bb*c.p/100}:null;}).filter(Boolean)
+    ? n.p.sc.map(function(c){var m=savById(c.id);return m?{id:m.id,n:m.n,unit:m.unit,subs:planSubs(n.p,m.id).map(function(s){return s.n;}),limit:n.bb*c.p/100}:null;}).filter(Boolean)
     : (function(){ var ft=fundTargets(pid); return S.funds.map(function(f){
         var t=ft[f.id]||{hedef:0,limit:0,harcanan:0};
         return {id:f.id,n:f.n,unit:f.unit,subs:[],limit:t.hedef,v:f.v,catLimit:t.limit,catSpent:t.harcanan};
@@ -837,7 +1123,8 @@ function investPane(bucket){
   h+='<p class="sub">'+(bucket==='uzun'
       ? 'Birikim bütçesinden yapılan alım ve satımlar.'
       : 'Her ay harcanmayan kalemlerin biriktirildiği hesaplar.')+'</p>';
-  h+='<label class="f"><span>Tarih</span><input type="date" id="ivDate" value="'+today()+'"></label>';
+  h+='<label class="f"><span>Tarih</span><input type="date" id="ivDate" value="'+today()+'" onchange="dateNote(\'ivDate\',\'ivDateNote\')"></label>';
+  h+='<p class="dnote" id="ivDateNote"></p>';
   h+='<label class="f"><span>Kategori</span><select id="ivCat" onchange="fillIvSub()">'+
       cats.map(function(c){return '<option value="'+c.id+'">'+esc(c.n)+(c.v?' ('+esc(c.v)+')':'')+'</option>';}).join('')+'</select></label>';
   h+='<label class="f" id="ivSubWrap" style="display:none"><span>Alt kalem</span><select id="ivSub"></select></label>';
@@ -849,6 +1136,7 @@ function investPane(bucket){
   h+='<label class="f"><span>Diğer giderler (₺)</span><input type="number" inputmode="decimal" id="ivFees" placeholder="0" oninput="ivCalc()"></label>';
   h+='</div>';
   h+='<label class="f"><span>Bu işlem günü USD/TRY kuru</span><input type="number" inputmode="decimal" id="ivUsd" value="'+(S.lastUsd||'')+'" placeholder="Örn. 42,15" oninput="ivCalc()"></label>';
+  h+='<label class="f"><span>Kart / hesap</span><select id="ivAcc">'+accOptions(S.lastAcc.y)+'</select></label>';
   h+='<label class="f"><span>Not</span><input type="text" id="ivNote" placeholder="İsteğe bağlı"></label>';
   h+='<div class="between" style="padding:8px 0"><span class="lbl">İşlem tutarı</span><span class="mid" id="ivOut">—</span></div>';
   h+='<button class="wide" onclick="addInvest(\''+bucket+'\')">Yatırımı kaydet</button></div>';
@@ -869,20 +1157,23 @@ function investPane(bucket){
   h+='<div class="card"><div class="between"><h2>Dönem kayıtları</h2><span class="tag">'+list.length+'</span></div>';
   if(!list.length) h+='<div class="empty">Bu dönemde kayıt yok.</div>';
   list.forEach(function(i){
-    var c=cats.filter(function(x){return x.id===i.cat;})[0];
-    h+='<div class="item"><div class="d">'+dshort(i.date)+'</div><div class="t"><b>'+esc(c?c.n:i.cat)+(i.sub?' · '+esc(i.sub):'')+'</b>'+
-       '<small>'+(i.type==='sat'?'Satış':'Alış')+' '+qty(i.qty)+' × '+tl2(i.price)+' · kur '+nf2.format(i.usd)+'</small></div>'+
-       '<div class="a '+(i.type==='sat'?'neg':'')+'">'+tl(netTl(i))+'<br><span class="lbl">'+usd(netTl(i)/(i.usd||1))+'</span>'+
-       '<br><button class="ghost slim" style="margin-top:4px" onclick="editInvest(\''+i.id+'\')">Düzenle</button></div></div>';
+    h+=investItem(i,cats);
   });
   h+='</div>';
-  setTimeout(fillIvSub,0);
+  setTimeout(function(){ fillIvSub(); dateNote('ivDate','ivDateNote'); },0);
   return h;
+}
+function investItem(i,cats){
+  var c=(cats||[]).filter(function(x){return x.id===i.cat;})[0] || savById(i.cat) || fundById(i.cat);
+  return '<div class="item"><div class="d">'+dshort(i.date)+'</div><div class="t"><b>'+esc(c?c.n:i.cat)+(i.sub?' · '+esc(i.sub):'')+'</b>'+
+     '<small>'+(i.type==='sat'?'Satış':'Alış')+' '+qty(i.qty)+' × '+tl2(i.price)+' · kur '+nf2.format(i.usd)+(i.acc?' · '+esc(accName(i.acc)):'')+'</small></div>'+
+     '<div class="a '+(i.type==='sat'?'neg':'')+'">'+tl(netTl(i))+'<br><span class="lbl">'+usd(i.usd?netTl(i)/i.usd:0)+'</span>'+
+     '<br><button class="ghost slim" style="margin-top:4px" onclick="editInvest(\''+i.id+'\')">Düzenle</button></div></div>';
 }
 function fillIvSub(){
   var sel=document.getElementById('ivCat'); if(!sel)return;
   var id=sel.value, m=savById(id);
-  var subs=m&&m.subs?m.subs.map(function(s){return s.n;}):[];
+  var subs=m?planSubs(getPlan(curPid(),true),id).map(function(s){return s.n;}):[];
   var wrap=document.getElementById('ivSubWrap'), ss=document.getElementById('ivSub');
   wrap.style.display=subs.length?'block':'none';
   ss.innerHTML='<option value=""></option>'+subs.map(function(s){return '<option>'+esc(s)+'</option>';}).join('');
@@ -902,19 +1193,25 @@ function addInvest(bucket){
   if(!q||!price){ alert('Fiyat ve miktar girin.'); return; }
   if(!u){ alert('USD kurunu girin. Dolar bazlı takip buna dayanıyor.'); return; }
   var subEl=document.getElementById('ivSub');
+  var d=document.getElementById('ivDate').value||today();
+  var acc=document.getElementById('ivAcc').value;
   S.invests.push({
     id:'i'+Date.now()+Math.random().toString(36).slice(2,6),
     bucket:bucket,
-    date:document.getElementById('ivDate').value||today(),
+    date:d,
     cat:document.getElementById('ivCat').value,
     sub:(subEl&&subEl.parentNode.style.display!=='none')?subEl.value:'',
     type:document.getElementById('ivType').value,
     price:price, qty:q,
     fees:parseFloat(document.getElementById('ivFees').value)||0,
     usd:u,
+    acc:acc,
     note:document.getElementById('ivNote').value.trim()
   });
-  S.lastUsd=u; save(); render();
+  /* Son kur, yalnızca daha yeni tarihli bir işlemle güncellenir. */
+  if(!S.lastUsdAt || d>=S.lastUsdAt){ S.lastUsd=u; S.lastUsdAt=d; }
+  S.lastAcc.y=acc;
+  save(); render(); savedNote(d,'Yatırım');
 }
 function editInvest(id){
   var i=S.invests.filter(function(x){return x.id===id;})[0]; if(!i)return;
@@ -925,6 +1222,7 @@ function editInvest(id){
   h+='<div class="grid2"><label class="f"><span>Miktar</span><input type="number" inputmode="decimal" id="idQty" value="'+i.qty+'"></label>';
   h+='<label class="f"><span>Diğer gider</span><input type="number" inputmode="decimal" id="idFees" value="'+(i.fees||0)+'"></label></div>';
   h+='<label class="f"><span>USD kuru</span><input type="number" inputmode="decimal" id="idUsd" value="'+i.usd+'"></label>';
+  h+='<label class="f"><span>Kart / hesap</span><select id="idAcc">'+accOptions(i.acc||'')+'</select></label>';
   h+='<label class="f"><span>Alt kalem</span><input type="text" id="idSub" value="'+esc(i.sub)+'"></label>';
   h+='<label class="f"><span>Not</span><input type="text" id="idNote" value="'+esc(i.note)+'"></label>';
   h+='<div class="row" style="margin-top:12px"><button class="danger" onclick="delInvest(\''+id+'\')">Sil</button>'+
@@ -933,12 +1231,13 @@ function editInvest(id){
 }
 function saveInvest(id){
   var i=S.invests.filter(function(x){return x.id===id;})[0]; if(!i)return;
-  i.date=document.getElementById('idDate').value;
+  i.date=document.getElementById('idDate').value||i.date;
   i.type=document.getElementById('idType').value;
   i.price=parseFloat(document.getElementById('idPrice').value)||0;
   i.qty=parseFloat(document.getElementById('idQty').value)||0;
   i.fees=parseFloat(document.getElementById('idFees').value)||0;
   i.usd=parseFloat(document.getElementById('idUsd').value)||i.usd;
+  i.acc=document.getElementById('idAcc').value;
   i.sub=document.getElementById('idSub').value.trim();
   i.note=document.getElementById('idNote').value.trim();
   save(); closeSheet(); render();
@@ -950,61 +1249,248 @@ function delInvest(id){
 }
 
 /* --- portföy --- */
-function holdings(bucket){
+/* Ortalama maliyet yöntemi. Alışta maliyet eklenir. Satışta satılan miktarın
+   ortalama maliyeti düşülür, satış geliri ile bu maliyet arasındaki fark
+   gerçekleşen kâr olarak ayrı tutulur. Dolar maliyeti her işlemin kendi kuruyla
+   hesaplanır. bucket boşsa iki bölüm birlikte, upto verilirse o tarihe kadar. */
+function holdings(bucket,upto){
   var m={};
-  S.invests.filter(function(i){return i.bucket===bucket;}).forEach(function(i){
-    var k=i.cat+(i.sub?'|'+i.sub:'');
-    if(!m[k]) m[k]={cat:i.cat,sub:i.sub,qty:0,tl:0,usd:0};
-    var sgn=i.type==='sat'?-1:1;
-    m[k].qty+=sgn*(+i.qty||0);
-    m[k].tl+=netTl(i);
-    m[k].usd+=netTl(i)/(i.usd||1);
-  });
+  S.invests.map(function(i,ix){return {i:i,ix:ix};})
+    .filter(function(o){ return (!bucket||o.i.bucket===bucket) && (!upto||o.i.date<=upto); })
+    .sort(function(a,b){ return a.i.date<b.i.date?-1:(a.i.date>b.i.date?1:a.ix-b.ix); })
+    .forEach(function(o){
+      var i=o.i, k=i.cat+(i.sub?'|'+i.sub:'');
+      if(!m[k]) m[k]={key:k,cat:i.cat,sub:i.sub||'',bucket:i.bucket,qty:0,cost:0,costUsd:0,real:0,realUsd:0,count:0};
+      var r=m[k], q=+i.qty||0, g=(+i.price||0)*q, f=+i.fees||0, u=+i.usd||0;
+      r.count++;
+      if(i.type==='sat'){
+        var oran=r.qty>0?Math.min(1,q/r.qty):0;
+        var cOut=r.cost*oran, uOut=r.costUsd*oran, gelir=g-f;
+        r.real+=gelir-cOut; r.realUsd+=(u?gelir/u:0)-uOut;
+        r.cost-=cOut; r.costUsd-=uOut; r.qty-=q;
+      } else {
+        r.qty+=q; r.cost+=g+f; r.costUsd+=u?(g+f)/u:0;
+      }
+      if(Math.abs(r.qty)<1e-9){ r.qty=0; r.cost=0; r.costUsd=0; }
+    });
   return m;
 }
+function holdVal(r){
+  var pr=S.prices[r.key], o={pr:pr||null,val:null,valUsd:null,fark:null,farkUsd:null};
+  if(pr && r.qty>0){
+    o.val=pr.price*r.qty; o.fark=o.val-r.cost;
+    if(S.lastUsd>0){ o.valUsd=o.val/S.lastUsd; o.farkUsd=o.valUsd-r.costUsd; }
+  }
+  return o;
+}
+function holdName(r){
+  var c=savById(r.cat)||fundById(r.cat);
+  return (c?c.n:r.cat)+(r.sub?' · '+r.sub:'');
+}
+function holdUnit(r){ var c=savById(r.cat)||fundById(r.cat); return (c&&c.unit)||''; }
+function holdTotals(m){
+  var t={cost:0,costUsd:0,real:0,realUsd:0,pc:0,pcUsd:0,val:0,valUsd:0,priced:0,missing:0};
+  Object.keys(m).forEach(function(k){
+    var r=m[k], v=holdVal(r);
+    t.real+=r.real; t.realUsd+=r.realUsd;
+    if(r.qty<=0) return;
+    t.cost+=r.cost; t.costUsd+=r.costUsd;
+    if(v.val===null){ t.missing++; return; }
+    t.priced++; t.pc+=r.cost; t.pcUsd+=r.costUsd; t.val+=v.val; if(v.valUsd!==null) t.valUsd+=v.valUsd;
+  });
+  return t;
+}
+function farkHtml(f,base,fmt){
+  if(f===null) return '<span class="r">—</span>';
+  var p=base>0?' ('+pct(f/base*100)+')':'';
+  return '<span class="r '+(f>=0?'pos':'neg')+'">'+(fmt===usd?signUsd(f):signTl(f))+p+'</span>';
+}
+function totalsBlock(t){
+  var usdOk=S.lastUsd>0;
+  var h='<div class="kv"><span class="h"></span><span class="h r">₺</span><span class="h r">$</span>';
+  h+='<span>Maliyet</span><span class="r">'+tl(t.cost)+'</span><span class="r">'+usd(t.costUsd)+'</span>';
+  h+='<span>Güncel değer</span><span class="r">'+(t.priced?tl(t.val):'—')+'</span><span class="r">'+(t.priced&&usdOk?usd(t.valUsd):'—')+'</span>';
+  h+='<span>Fark</span>'+farkHtml(t.priced?t.val-t.pc:null,t.pc,tl)+farkHtml(t.priced&&usdOk?t.valUsd-t.pcUsd:null,t.pcUsd,usd);
+  if(Math.abs(t.real)>0.005) h+='<span>Gerçekleşen kâr</span><span class="r '+(t.real>=0?'pos':'neg')+'">'+signTl(t.real)+'</span><span class="r '+(t.realUsd>=0?'pos':'neg')+'">'+signUsd(t.realUsd)+'</span>';
+  h+='</div>';
+  if(t.missing) h+='<p class="lbl" style="margin-top:6px">'+t.missing+' kalemin güncel fiyatı yok. Değer ve fark yalnızca fiyatı girilen kalemleri kapsar.</p>';
+  return h;
+}
+function usdLine(){
+  return S.lastUsd>0
+    ? 'Dolar değeri '+nf2.format(S.lastUsd)+' kuruyla hesaplanır'+(S.lastUsdAt?' ('+dlong(S.lastUsdAt)+')':'')+'.'
+    : 'Dolar değeri için Güncel fiyatlar ekranına bugünkü kuru girin.';
+}
+function holdRow(r){
+  var v=holdVal(r), un=holdUnit(r);
+  if(r.qty<=0){
+    return '<div class="catrow"><div class="between"><span class="catname">'+esc(holdName(r))+' <span class="tag">kapandı</span></span>'+
+      '<span class="catnums">'+(Math.abs(r.real)>0.005?'Gerçekleşen <span class="'+(r.real>=0?'pos':'neg')+'">'+signTl(r.real)+'</span>':'')+'</span></div></div>';
+  }
+  var h='<div class="catrow"><div class="between"><span class="catname">'+esc(holdName(r))+'</span><span class="catnums">'+qty(r.qty)+(un?' '+esc(un):'')+'</span></div>';
+  h+='<div class="kv">';
+  h+='<span class="h">Ortalama maliyet</span><span class="r">'+tl2(r.cost/r.qty)+'</span><span class="r">'+usd(r.costUsd/r.qty)+'</span>';
+  h+='<span class="h">Maliyet</span><span class="r">'+tl(r.cost)+'</span><span class="r">'+usd(r.costUsd)+'</span>';
+  h+='<span class="h">Değer</span><span class="r">'+(v.val!==null?tl(v.val):'—')+'</span><span class="r">'+(v.valUsd!==null?usd(v.valUsd):'—')+'</span>';
+  h+='<span class="h">Fark</span>'+farkHtml(v.fark,r.cost,tl)+farkHtml(v.farkUsd,r.costUsd,usd);
+  if(Math.abs(r.real)>0.005) h+='<span class="h">Gerçekleşen kâr</span><span class="r '+(r.real>=0?'pos':'neg')+'">'+signTl(r.real)+'</span><span class="r '+(r.realUsd>=0?'pos':'neg')+'">'+signUsd(r.realUsd)+'</span>';
+  h+='</div>';
+  h+='<p class="lbl" style="margin-top:4px">'+(v.pr?'Güncel fiyat '+tl2(v.pr.price)+(v.pr.at?', '+dlong(v.pr.at):''):'Güncel fiyat girilmedi')+'</p>';
+  h+='</div>';
+  return h;
+}
 function holdingsCard(bucket,cats){
-  var m=holdings(bucket), keys=Object.keys(m);
+  var m=holdings(bucket), keys=Object.keys(m).sort();
   if(!keys.length) return '<div class="card"><h2>Portföy</h2><div class="empty">Henüz yatırım kaydı yok.</div></div>';
   var h='<div class="card"><div class="between"><h2>Portföy</h2><button class="ghost slim" onclick="editPrices(\''+bucket+'\')">Güncel fiyatlar</button></div>';
-  h+='<p class="sub">Maliyet, girdiğiniz işlemlerden hesaplanır. Güncel değer için birim fiyatları elle güncellemeniz gerekir.</p>';
-  h+='<div class="scroll"><table class="hold"><tr><th>Kalem</th><th>Miktar</th><th>Maliyet ₺</th><th>Maliyet $</th><th>Değer ₺</th><th>Fark</th></tr>';
-  var tTl=0,tUsd=0,tVal=0,anyPrice=false;
-  keys.sort().forEach(function(k){
-    var r=m[k];
-    var nm=(cats.filter(function(c){return c.id===r.cat;})[0]||{n:r.cat}).n+(r.sub?' · '+r.sub:'');
-    var pr=S.prices[k];
-    var val=pr?pr.price*r.qty:null;
-    if(pr)anyPrice=true;
-    var diff=val!==null?val-r.tl:null;
-    tTl+=r.tl; tUsd+=r.usd; tVal+=val!==null?val:r.tl;
-    h+='<tr><td>'+esc(nm)+'</td><td>'+qty(r.qty)+'</td><td>'+tl(r.tl)+'</td><td>'+usd(r.usd)+'</td>'+
-       '<td>'+(val!==null?tl(val):'—')+'</td><td class="'+(diff===null?'':(diff>=0?'pos':'neg'))+'">'+(diff===null?'—':(diff>=0?'+':'')+tl(diff))+'</td></tr>';
-  });
-  h+='<tr><td><b>Toplam</b></td><td></td><td><b>'+tl(tTl)+'</b></td><td><b>'+usd(tUsd)+'</b></td><td><b>'+(anyPrice?tl(tVal):'—')+'</b></td>'+
-     '<td class="'+(tVal-tTl>=0?'pos':'neg')+'"><b>'+(anyPrice?((tVal-tTl>=0?'+':'')+tl(tVal-tTl)):'—')+'</b></td></tr>';
-  h+='</table></div></div>';
+  h+='<p class="sub">Maliyet ortalama maliyet yöntemiyle hesaplanır. Satışta satılan miktarın maliyeti düşülür, aradaki fark gerçekleşen kâr olarak ayrı görünür. '+usdLine()+'</p>';
+  h+=totalsBlock(holdTotals(m));
+  var acik=keys.filter(function(k){return m[k].qty>0;}), kapali=keys.filter(function(k){return m[k].qty<=0;});
+  acik.concat(kapali).forEach(function(k){ h+=holdRow(m[k]); });
+  h+='</div>';
   return h;
 }
 function editPrices(bucket){
-  var m=holdings(bucket), keys=Object.keys(m).sort();
-  var h='<h2>Güncel birim fiyatlar</h2><p class="sub">Portföyün bugünkü değerini görmek için her kalemin güncel birim fiyatını girin.</p><div id="prList">';
+  var m=holdings(bucket), keys=Object.keys(m).filter(function(k){return m[k].qty>0;}).sort();
+  var h='<h2>Güncel birim fiyatlar</h2><p class="sub">Portföyün bugünkü değerini görmek için kalemlerin güncel birim fiyatını ve bugünkü kuru girin. Boş bıraktığınız kalemin eski fiyatı kalır. Her kayıt değer grafiğine bir nokta ekler.</p><div id="prList">';
   keys.forEach(function(k){
-    var r=m[k];
-    var nm=(savById(r.cat)||fundById(r.cat)||{n:r.cat}).n+(r.sub?' · '+r.sub:'');
-    var cur=S.prices[k]?S.prices[k].price:'';
-    h+='<label class="f"><span>'+esc(nm)+' ('+qty(r.qty)+')</span><input type="number" inputmode="decimal" data-k="'+esc(k)+'" value="'+cur+'" placeholder="Birim fiyat ₺"></label>';
+    var r=m[k], pr=S.prices[k];
+    h+='<label class="f"><span>'+esc(holdName(r))+' ('+qty(r.qty)+')'+(pr?' · son '+tl2(pr.price)+(pr.at?', '+dlong(pr.at):''):'')+'</span>'+
+       '<input type="number" inputmode="decimal" data-k="'+esc(k)+'" value="" placeholder="Birim fiyat ₺"></label>';
   });
-  h+='</div><label class="f"><span>Bugünkü USD/TRY</span><input type="number" inputmode="decimal" id="prUsd" value="'+(S.lastUsd||'')+'"></label>';
+  if(!keys.length) h+='<div class="empty">Elde tutulan kalem yok.</div>';
+  h+='</div><label class="f"><span>Bugünkü USD/TRY'+(S.lastUsdAt?' · son '+nf2.format(S.lastUsd)+', '+dlong(S.lastUsdAt):'')+'</span><input type="number" inputmode="decimal" id="prUsd" value="'+(S.lastUsd||'')+'"></label>';
   h+='<div class="row"><button class="ghost grow" onclick="closeSheet()">Vazgeç</button><button class="grow" onclick="savePrices()">Kaydet</button></div>';
   openSheet(h);
 }
 function savePrices(){
+  var d=today();
   document.getElementById('prList').querySelectorAll('input').forEach(function(i){
     var v=parseFloat(i.value);
-    if(v>0) S.prices[i.dataset.k]={price:v,at:today()};
+    if(v>0) S.prices[i.dataset.k]={price:v,at:d};
   });
-  var u=parseFloat(document.getElementById('prUsd').value); if(u>0) S.lastUsd=u;
-  save(); closeSheet(); render();
+  var u=parseFloat(document.getElementById('prUsd').value);
+  if(u>0){ S.lastUsd=u; S.lastUsdAt=d; }
+  logPrices(d);
+  save(); closeSheet(); render(); toast('Fiyatlar kaydedildi.');
+}
+/* Değer grafiği için o günün fiyatlarını ve kurunu saklar. Aynı gün ikinci kayıt öncekinin yerine geçer. */
+function logPrices(d){
+  var snap={d:d,usd:S.lastUsd||0,p:{}};
+  Object.keys(S.prices).forEach(function(k){ snap.p[k]=S.prices[k].price; });
+  var L=S.priceLog;
+  if(L.length && L[L.length-1].d===d) L[L.length-1]=snap; else L.push(snap);
+  L.sort(function(a,b){return a.d<b.d?-1:(a.d>b.d?1:0);});
+}
+/* ---------- rapor aralığı ---------- */
+var rr={h:{m:'p6',a:'',b:''},y:{m:'p6',a:'',b:''}};
+function recordPids(){
+  var ks=Object.keys(S.plans);
+  S.expenses.forEach(function(e){ if(e.date) ks.push(periodIdOf(e.date)); });
+  S.invests.forEach(function(i){ if(i.date) ks.push(periodIdOf(i.date)); });
+  return ks.sort();
+}
+function pidSpan(a,b){
+  var out=[], k=a, guard=0;
+  while(k<=b && guard<240){ out.push(k); k=shiftPeriod(k,1); guard++; }
+  return out;
+}
+function rangeOf(w){
+  var o=rr[w], cp=curPid(), pids, from, to, ozel=false, ks=recordPids();
+  var first=ks.length?ks[0]:cp, last=ks.length?ks[ks.length-1]:cp;
+  if(o.m==='ozel'){
+    from=o.a||periodInfo(cp).start; to=o.b||today();
+    if(to<from){ var t=from; from=to; to=t; }
+    pids=pidSpan(periodIdOf(from),periodIdOf(to)); ozel=true;
+  } else if(o.m==='tum'){
+    pids=pidSpan(first<cp?first:cp, last>cp?last:cp);
+  } else {
+    var n={p1:1,p3:3,p6:6,p12:12}[o.m]||6;
+    pids=pidSpan(shiftPeriod(cp,-(n-1)),cp).filter(function(k){return k>=first||k===cp;});
+  }
+  if(!ozel){ from=periodInfo(pids[0]).start; to=periodInfo(pids[pids.length-1]).end; }
+  return {pids:pids,from:from,to:to,ozel:ozel};
+}
+function inRange(d,R){ return d>=R.from && d<=R.to; }
+function setRange(w,k,v){
+  rr[w][k]=v;
+  if(k==='m' && v==='ozel' && !rr[w].a){ rr[w].a=periodInfo(curPid()).start; rr[w].b=today(); }
+  render();
+}
+function rangeSel(w,R){
+  var o=rr[w];
+  var opts=[['p1','Görüntülenen dönem'],['p3','Son 3 dönem'],['p6','Son 6 dönem'],['p12','Son 12 dönem'],['tum','Tüm dönemler'],['ozel','Tarih aralığı']];
+  var h='<div class="card"><label class="f"><span>Rapor aralığı</span><select onchange="setRange(\''+w+'\',\'m\',this.value)">'+
+    opts.map(function(x){return '<option value="'+x[0]+'"'+(o.m===x[0]?' selected':'')+'>'+x[1]+'</option>';}).join('')+'</select></label>';
+  if(o.m==='ozel'){
+    h+='<div class="grid2"><label class="f"><span>Başlangıç</span><input type="date" value="'+R.from+'" onchange="setRange(\''+w+'\',\'a\',this.value)"></label>'+
+       '<label class="f"><span>Bitiş</span><input type="date" value="'+R.to+'" onchange="setRange(\''+w+'\',\'b\',this.value)"></label></div>';
+  }
+  h+='<div class="between"><span class="lbl">'+dfull(R.from)+' ile '+dfull(R.to)+' arası'+(R.ozel?'':', '+R.pids.length+' dönem')+'</span>'+
+     '<button class="ghost slim" style="flex:none;white-space:nowrap" onclick="csvExport(\''+w+'\')">CSV indir</button></div>';
+  if(!R.ozel && o.m!=='p1' && o.m!=='tum') h+='<p class="lbl" style="margin-top:4px">Aralık üstte seçili dönemde biter.</p>';
+  h+='</div>';
+  return h;
+}
+/* ---------- kart ve hesap dağılımı ---------- */
+function accountCard(R){
+  var m={};
+  function row(k){ return m[k]||(m[k]={h:0,y:0,s:0}); }
+  S.expenses.forEach(function(e){ if(inRange(e.date,R)) row(e.acc||'').h+=+e.amount||0; });
+  S.invests.forEach(function(i){
+    if(!inRange(i.date,R)) return;
+    var g=(+i.price||0)*(+i.qty||0), f=+i.fees||0;
+    if(i.type==='sat') row(i.acc||'').s+=g-f; else row(i.acc||'').y+=g+f;
+  });
+  var keys=Object.keys(m);
+  var h='<div class="card"><h2>Kart ve hesap dağılımı</h2>';
+  h+='<p class="sub">Harcamalar iadeler düşülerek, birikimler alış tutarıyla sayılır. Aralık bütçe dönemine göredir, kartın hesap kesim tarihiyle örtüşmeyebilir.</p>';
+  if(!keys.length) return h+'<div class="empty">Bu aralıkta kayıt yok.</div></div>';
+  function grp(k){ if(!k) return 3; var a=accById(k); return a?(a.t==='kart'?0:1):2; }
+  keys.sort(function(a,b){ return grp(a)-grp(b) || (m[b].h+m[b].y)-(m[a].h+m[a].y); });
+  var tH=0,tY=0,tS=0;
+  h+='<div class="scroll"><table class="hold"><tr><th>Kart / hesap</th><th>Harcama</th><th>Birikim</th><th>Toplam</th></tr>';
+  keys.forEach(function(k){
+    var r=m[k], a=accById(k); tH+=r.h; tY+=r.y; tS+=r.s;
+    if(Math.abs(r.h)<0.005 && Math.abs(r.y)<0.005) return;
+    h+='<tr><td>'+esc(accName(k))+(a&&a.t==='hesap'?' <span class="tag">hesap</span>':'')+'</td><td>'+tl(r.h)+'</td><td>'+tl(r.y)+'</td><td><b>'+tl(r.h+r.y)+'</b></td></tr>';
+  });
+  h+='<tr><td><b>Toplam</b></td><td><b>'+tl(tH)+'</b></td><td><b>'+tl(tY)+'</b></td><td><b>'+tl(tH+tY)+'</b></td></tr></table></div>';
+  if(tS>0.005){
+    h+='<p class="lbl" style="margin-top:8px">Satışlardan gelen '+tl(tS)+' tabloya girmedi. '+
+       keys.filter(function(k){return m[k].s>0.005;}).map(function(k){return esc(accName(k))+' '+tl(m[k].s);}).join(', ')+'</p>';
+  }
+  h+='</div>';
+  return h;
+}
+/* ---------- CSV ---------- */
+function download(text,type,fname){
+  var blob=new Blob([text],{type:type});
+  var a=document.createElement('a');
+  a.href=URL.createObjectURL(blob); a.download=fname;
+  document.body.appendChild(a); a.click(); a.remove();
+}
+function csvExport(w){
+  var R=rangeOf(w), rows=[], name;
+  function cell(v){ v=(v==null?'':''+v); return /[;"\n\r]/.test(v)?'"'+v.replace(/"/g,'""')+'"':v; }
+  function byDate(a,b){ return a.date<b.date?-1:(a.date>b.date?1:0); }
+  if(w==='h'){
+    name='harcamalar';
+    rows.push(['Tarih','Dönem','Kategori','Alt kalem','Tür','Tutar TL','Kart / hesap','Not']);
+    S.expenses.filter(function(e){return inRange(e.date,R);}).sort(byDate).forEach(function(e){
+      rows.push([e.date,periodInfo(periodIdOf(e.date)).label,(catById(e.cat)||{n:e.cat}).n,e.sub||'',e.amount<0?'İade':'Harcama',num2(e.amount),e.acc?accName(e.acc):'',e.note||'']);
+    });
+  } else {
+    name='yatirimlar';
+    rows.push(['Tarih','Dönem','Bölüm','Kategori','Alt kalem','İşlem','Birim fiyat TL','Miktar','Diğer gider TL','Net tutar TL','USD/TRY','Net tutar USD','Kart / hesap','Not']);
+    S.invests.filter(function(i){return inRange(i.date,R);}).sort(byDate).forEach(function(i){
+      var c=savById(i.cat)||fundById(i.cat), nt=netTl(i);
+      rows.push([i.date,periodInfo(periodIdOf(i.date)).label,i.bucket==='fon'?'Harcama fonu':'Hedeflenen',c?c.n:i.cat,i.sub||'',i.type==='sat'?'Satış':'Alış',
+        num2(i.price),(''+(+i.qty||0)).replace('.',','),num2(i.fees),num2(nt),num2(i.usd),num2(i.usd?nt/i.usd:0),i.acc?accName(i.acc):'',i.note||'']);
+    });
+  }
+  if(rows.length<2){ alert('Bu aralıkta kayıt yok.'); return; }
+  download('\uFEFF'+rows.map(function(r){return r.map(cell).join(';');}).join('\r\n'),'text/csv;charset=utf-8','butce-'+name+'-'+R.from+'-'+R.to+'.csv');
 }
 /* --- karne --- */
 function scoredPids(){
@@ -1135,23 +1621,102 @@ function investScorecard(){
   return h;
 }
 function investReport(){
-  var h=investScorecard();
-  h+='<div class="card"><h2>Birikmiş yatırım</h2><p class="sub">Tüm dönemlerin toplamı. Mavi çizgi lira, sarı çizgi dolar karşılığı.</p>';
-  var all=S.invests.slice();
-  if(all.length<2){ h+='<div class="empty">Grafik için en az iki yatırım kaydı gerekiyor.</div></div>'; return h; }
-  var ptsTl=cumSeries(all,function(i){return netTl(i);});
-  var ptsUsd=cumSeries(all,function(i){return netTl(i)/(i.usd||1);});
-  h+=lineChart([{color:'#2C5673',pts:ptsTl}],tl);
-  h+='<div class="legend"><span><s style="background:#2C5673"></s>Toplam maliyet ₺</span></div>';
-  h+='<div style="margin-top:14px">'+lineChart([{color:'#A8812B',pts:ptsUsd}],usd)+'</div>';
-  h+='<div class="legend"><span><s style="background:#A8812B"></s>Toplam maliyet $</span></div>';
+  var R=rangeOf('y');
+  var h=rangeSel('y',R);
+  h+=portfolioSummary()+valueHistoryCard()+invRangeCard(R)+accountCard(R)+investScorecard()+cumCard()+itemCard();
+  return h;
+}
+function portfolioSummary(){
+  var all=holdings(null);
+  var h='<div class="card"><h2>Portföy özeti</h2>';
+  if(!Object.keys(all).length) return h+'<div class="empty">Henüz yatırım kaydı yok.</div></div>';
+  h+='<p class="sub">Hedeflenen yatırımlar ve harcama fonları birlikte. '+usdLine()+'</p>';
+  h+=totalsBlock(holdTotals(all));
+  var parts=[['uzun','Hedeflenen'],['fon','Harcama fonları']];
+  h+='<div class="scroll" style="margin-top:10px"><table class="hold"><tr><th>Bölüm</th><th>Maliyet</th><th>Değer</th><th>Fark</th></tr>';
+  parts.forEach(function(p){
+    var t=holdTotals(holdings(p[0]));
+    if(!t.cost && !t.real) return;
+    h+='<tr><td>'+p[1]+'</td><td>'+tl(t.cost)+'</td><td>'+(t.priced?tl(t.val):'—')+'</td><td class="'+(t.val-t.pc>=0?'pos':'neg')+'">'+(t.priced?signTl(t.val-t.pc):'—')+'</td></tr>';
+  });
+  h+='</table></div></div>';
+  return h;
+}
+function valueHistoryCard(){
+  var L=S.priceLog.filter(function(s){return s.usd>0;});
+  var h='<div class="card"><h2>Portföy değeri</h2><p class="sub">Güncel fiyatları her girdiğinizde o günün değeri kaydedilir. Fiyatı olmayan kalemler bu grafiğe girmez.</p>';
+  if(L.length<2) return h+'<div class="empty">Güncel fiyatları farklı günlerde en az iki kez girdiğinizde grafik oluşur.</div></div>';
+  var vT=[],cT=[],vU=[],cU=[];
+  L.forEach(function(s){
+    var m=holdings(null,s.d), val=0, cost=0, costU=0;
+    Object.keys(m).forEach(function(k){ var r=m[k]; if(r.qty>0 && s.p[k]){ val+=s.p[k]*r.qty; cost+=r.cost; costU+=r.costUsd; } });
+    var x=new Date(s.d+'T12:00:00').getTime();
+    vT.push({x:x,y:val}); cT.push({x:x,y:cost}); vU.push({x:x,y:val/s.usd}); cU.push({x:x,y:costU});
+  });
+  h+=lineChart([{color:'#9AA8A2',pts:cT},{color:'#2C5673',pts:vT}],tl);
+  h+='<div class="legend"><span><s style="background:#2C5673"></s>Değer ₺</span><span><s style="background:#9AA8A2"></s>Maliyet ₺</span></div>';
+  h+='<div style="margin-top:14px">'+lineChart([{color:'#9AA8A2',pts:cU},{color:'#A8812B',pts:vU}],usd)+'</div>';
+  h+='<div class="legend"><span><s style="background:#A8812B"></s>Değer $</span><span><s style="background:#9AA8A2"></s>Maliyet $</span></div>';
+  var a=vT[vT.length-1], b=cT[cT.length-1], au=vU[vU.length-1], bu=cU[cU.length-1];
+  h+='<div class="kv"><span class="h">Son kayıt '+dlong(L[L.length-1].d)+'</span><span class="h r">₺</span><span class="h r">$</span>'+
+     '<span>Değer</span><span class="r">'+tl(a.y)+'</span><span class="r">'+usd(au.y)+'</span>'+
+     '<span>Fark</span>'+farkHtml(a.y-b.y,b.y,tl)+farkHtml(au.y-bu.y,bu.y,usd)+'</div>';
   h+='</div>';
-
-  h+='<div class="card"><h2>Kalem bazında</h2><p class="sub">Bir kalemi seçin, zamana bağlı birikimini görün.</p>';
+  return h;
+}
+function invRangeCard(R){
+  var L=rangeLimits(R), uz={}, fn={}, fh={};
+  S.invests.forEach(function(i){
+    if(!inRange(i.date,R)) return;
+    var t=i.bucket==='fon'?fn:uz; t[i.cat]=(t[i.cat]||0)+netTl(i);
+  });
+  if(!R.ozel) R.pids.forEach(function(k){
+    if(!S.plans[k]) return;
+    var ft=fundTargets(k); Object.keys(ft).forEach(function(f){ fh[f]=(fh[f]||0)+ft[f].hedef; });
+  });
+  var tU=0; Object.keys(uz).forEach(function(k){tU+=uz[k];});
+  var tF=0; Object.keys(fn).forEach(function(k){tF+=fn[k];});
+  var h='<div class="card"><h2>Aralıktaki yatırımlar</h2><p class="sub">Net tutar, alışlardan satış gelirleri düşülerek bulunur.'+(R.ozel?'':' Hedefler aralıktaki dönem planlarının toplamıdır.')+'</p>';
+  h+='<div class="stat2"><div><p class="lbl">Hedeflenen</p><p class="mid gold">'+tl(tU)+'</p>'+(R.ozel?'':'<p class="lbl">Hedef '+tl(L.bb)+'</p>')+'</div>';
+  h+='<div><p class="lbl">Harcama fonları</p><p class="mid">'+tl(tF)+'</p>'+(R.ozel?'':'<p class="lbl">Hedef '+tl(sum(Object.keys(fh),function(k){return fh[k];}))+'</p>')+'</div></div>';
+  h+='<h3>Hedeflenen</h3>';
+  var ids={}; Object.keys(uz).forEach(function(k){ids[k]=1;}); Object.keys(L.sc).forEach(function(k){ if(L.sc[k]>0) ids[k]=1; });
+  var ks=Object.keys(ids).sort(function(a,b){return (uz[b]||0)-(uz[a]||0);});
+  if(!ks.length) h+='<div class="empty">Kayıt yok.</div>';
+  ks.forEach(function(k){
+    var m=savById(k), v=uz[k]||0, lim=L.sc[k]||0;
+    h+='<div class="catrow"><div class="between"><span class="catname">'+esc(m?m.n:'Silinmiş kategori')+'</span><span class="catnums">'+tl(v)+(R.ozel?'':' / '+tl(lim))+'</span></div>'+
+       (R.ozel?barHtml(v,tU,true):barHtml(v,lim,true))+'</div>';
+  });
+  h+='<h3>Harcama fonları</h3>';
+  S.funds.forEach(function(f){
+    var v=fn[f.id]||0, lim=fh[f.id]||0;
+    if(!v && !lim) return;
+    h+='<div class="catrow"><div class="between"><span class="catname">'+esc(f.n)+'</span><span class="catnums">'+tl(v)+(R.ozel?'':' / '+tl(lim))+'</span></div>'+
+       (R.ozel?barHtml(v,tF||1,true):barHtml(v,lim,true))+'</div>';
+  });
+  h+='</div>';
+  return h;
+}
+function cumCard(){
+  var h='<div class="card"><h2>Birikmiş net yatırım</h2><p class="sub">Tüm dönemler. Alışlardan satış gelirleri düşülerek biriken tutar. Mavi çizgi lira, sarı çizgi her işlemin kendi kuruyla dolar karşılığı.</p>';
+  var all=S.invests.slice();
+  if(all.length<2) return h+'<div class="empty">Grafik için en az iki yatırım kaydı gerekiyor.</div></div>';
+  h+=lineChart([{color:'#2C5673',pts:cumSeries(all,function(i){return netTl(i);})}],tl);
+  h+='<div class="legend"><span><s style="background:#2C5673"></s>Net yatırım ₺</span></div>';
+  h+='<div style="margin-top:14px">'+lineChart([{color:'#A8812B',pts:cumSeries(all,function(i){return i.usd?netTl(i)/i.usd:0;})}],usd)+'</div>';
+  h+='<div class="legend"><span><s style="background:#A8812B"></s>Net yatırım $</span></div>';
+  h+='</div>';
+  return h;
+}
+var ivRepSel='';
+function itemCard(){
   var opts=[];
   S.savingCats.forEach(function(c){opts.push({v:'uzun|'+c.id,n:c.n});});
   S.funds.forEach(function(f){opts.push({v:'fon|'+f.id,n:f.n});});
-  h+='<label class="f"><select id="ivRepSel" onchange="drawIvHist()">'+opts.map(function(o){return '<option value="'+o.v+'">'+esc(o.n)+'</option>';}).join('')+'</select></label>';
+  if(!ivRepSel || !opts.some(function(o){return o.v===ivRepSel;})) ivRepSel=(opts[0]||{}).v||'';
+  var h='<div class="card"><h2>Kalem bazında</h2><p class="sub">Bir kalemi seçin, maliyetini, güncel değerini ve işlemlerini görün.</p>';
+  h+='<label class="f"><select id="ivRepSel" onchange="ivRepSel=this.value;drawIvHist()">'+opts.map(function(o){return '<option value="'+o.v+'"'+(o.v===ivRepSel?' selected':'')+'>'+esc(o.n)+'</option>';}).join('')+'</select></label>';
   h+='<div id="ivHist"></div></div>';
   setTimeout(drawIvHist,0);
   return h;
@@ -1160,57 +1725,69 @@ function drawIvHist(){
   var box=document.getElementById('ivHist'); if(!box)return;
   var parts=document.getElementById('ivRepSel').value.split('|');
   var list=S.invests.filter(function(i){return i.bucket===parts[0]&&i.cat===parts[1];});
-  if(list.length<2){ box.innerHTML='<div class="empty">Bu kalemde en az iki kayıt gerekiyor.</div>'; return; }
-  var h=lineChart([{color:'#2E6B50',pts:cumSeries(list,function(i){return netTl(i);})}],tl);
-  h+='<div class="legend"><span><s style="background:#2E6B50"></s>₺ maliyet</span></div>';
-  h+='<div style="margin-top:12px">'+lineChart([{color:'#A8812B',pts:cumSeries(list,function(i){return netTl(i)/(i.usd||1);})}],usd)+'</div>';
-  h+='<div class="legend"><span><s style="background:#A8812B"></s>$ maliyet</span></div>';
-  var q=0,t=0,u=0;
-  list.forEach(function(i){var s=i.type==='sat'?-1:1;q+=s*i.qty;t+=netTl(i);u+=netTl(i)/(i.usd||1);});
-  h+='<hr class="sep"><div class="grid3"><div><p class="lbl">Miktar</p><p class="mid">'+qty(q)+'</p></div>'+
-     '<div><p class="lbl">Maliyet ₺</p><p class="mid">'+tl(t)+'</p></div>'+
-     '<div><p class="lbl">Maliyet $</p><p class="mid">'+usd(u)+'</p></div></div>';
+  if(!list.length){ box.innerHTML='<div class="empty">Bu kalemde kayıt yok.</div>'; return; }
+  var m=holdings(parts[0]), sub={};
+  Object.keys(m).forEach(function(k){ if(m[k].cat===parts[1]) sub[k]=m[k]; });
+  var h=Object.keys(sub).length>1?totalsBlock(holdTotals(sub)):'';
+  Object.keys(sub).sort().forEach(function(k){ h+=holdRow(sub[k]); });
+  if(list.length>=2){
+    h+='<div style="margin-top:12px">'+lineChart([{color:'#2E6B50',pts:cumSeries(list,function(i){return netTl(i);})}],tl)+'</div>';
+    h+='<div class="legend"><span><s style="background:#2E6B50"></s>Net yatırım ₺</span></div>';
+  }
+  h+='<h3>İşlemler</h3>';
+  list.slice().sort(function(a,b){return a.date<b.date?1:-1;}).slice(0,30).forEach(function(i){ h+=investItem(i); });
+  if(list.length>30) h+='<p class="lbl">Son 30 işlem gösteriliyor. Tamamı için CSV indirin.</p>';
   box.innerHTML=h;
 }
-
 /* =====================  AYARLAR  ===================== */
 function viewAyar(){
-  var h='<div class="card"><h2>Kategoriler</h2><p class="sub">Kategori adları ve alt kalemleri tüm dönemler için geçerli. Yüzdeler dönem bazında Planlama sekmesinden değişir.</p>';
+  var h='<div class="card"><h2>Kategoriler</h2><p class="sub">Kategori adları tüm dönemler için geçerli. Yüzdeler ve birikim alt oranları dönem bazında Planlama sekmesinden değişir.</p>';
   h+='<button class="wide ghost" onclick="manageCats(\'expenseCats\')">Harcama kategorileri</button>';
   h+='<div style="height:8px"></div><button class="wide ghost" onclick="manageCats(\'savingCats\')">Birikim kategorileri</button>';
   h+='<div style="height:8px"></div><button class="wide ghost" onclick="manageFunds()">Fon hesapları</button></div>';
 
+  var kart=S.accounts.filter(function(a){return !a.off&&a.t==='kart';}).length, hes=S.accounts.filter(function(a){return !a.off&&a.t==='hesap';}).length;
+  h+='<div class="card"><h2>Kartlar ve hesaplar</h2><p class="sub">'+kart+' kart, '+hes+' hesap. Harcama ve yatırım girerken bu listeden seçim yaparsınız.</p>';
+  h+='<button class="wide ghost" onclick="manageAccounts()">Kartları ve hesapları düzenle</button></div>';
+
   h+='<div class="card"><h2>Yedek</h2><p class="sub">Tüm veriyi bir dosyaya alın. Telefon değiştirdiğinizde veya tarayıcı verisi silindiğinde bu dosyadan geri yükleyin.</p>';
   h+='<button class="wide" onclick="exportData()">Yedeği indir</button>';
-  h+='<div style="height:8px"></div><label class="f"><span>Yedek dosyasından yükle</span><input type="file" id="impFile" accept="application/json" onchange="importData(this)"></label></div>';
+  h+='<div style="height:8px"></div><label class="f"><span>Yedek dosyasından yükle</span><input type="file" id="impFile" accept="application/json" onchange="importData(this)"></label>';
+  var eski=null; try{ eski=memOnly?null:localStorage.getItem(KEY+'_eski'); }catch(e){}
+  if(eski) h+='<button class="wide ghost slim" onclick="exportOld()">Güncelleme öncesi kopyayı indir</button>';
+  h+='</div>';
 
   var stat=[S.expenses.length+' harcama kaydı',S.invests.length+' yatırım kaydı',Object.keys(S.plans).length+' dönem planı'];
   h+='<div class="card"><h2>Veri</h2><p class="sub">'+stat.join(' · ')+'</p>';
   h+='<button class="wide danger" onclick="wipe()">Tüm verileri sil</button></div>';
 
-  h+='<div class="card"><h2>Dönem kuralı</h2><p class="sub">Dönem ayın 16\'sında başlar, ertesi ayın 15\'inde biter. Maaş dönemin son günü yatar, ödemeler o gün yapılır. Dönem adı bitiş ayından gelir. 16 Eylül ile 15 Ekim arası Ekim bütçesidir.</p></div>';
+  h+='<div class="card"><h2>Dönem kuralı</h2><p class="sub">Dönem ayın 16\'sında başlar, ertesi ayın 15\'inde biter. Maaş dönemin son günü yatar, ödemeler o gün yapılır. Dönem adı bitiş ayından gelir. 16 Eylül ile 15 Ekim arası Ekim bütçesidir.</p>';
+  h+='<p class="sub" style="margin:0">Uygulama kendiliğinden yeni döneme geçmez. Yeni dönem, planını onayladığınızda başlar. Kayıtlar tarihine göre ait olduğu döneme yazılır.</p></div>';
   return h;
 }
 function manageCats(kind){
-  var list=S[kind];
-  var h='<h2>'+(kind==='expenseCats'?'Harcama':'Birikim')+' kategorileri</h2>';
-  h+='<p class="sub">Burada kategori ve alt kalem adları değişir. Birikim alt kalemlerinin yüzdeleri Planlama sekmesindeki Alt oranlar düğmesinden ayarlanır. Yeni eklenen alt kalem, kalan paydan beslenir.</p><div id="mcList">';
+  var list=S[kind], sav=kind==='savingCats';
+  var h='<h2>'+(sav?'Birikim':'Harcama')+' kategorileri</h2>';
+  h+='<p class="sub">'+(sav
+    ? 'Burada kategori adları değişir. Alt kalemler ve oranları Planlama sekmesindeki Alt oranlar düğmesinden, dönem bazında ayarlanır.'
+    : 'Kategori ve alt kalem adlarını değiştirin. Alt kalemleri virgülle ayırın.')+'</p><div id="mcList">';
   list.forEach(function(c){
     var subs=(c.subs||[]).map(function(s){return typeof s==='string'?s:s.n;}).join(', ');
     h+='<div class="catrow" data-id="'+c.id+'">'+
        '<input type="text" data-f="n" value="'+esc(c.n)+'">'+
-       '<input type="text" data-f="subs" value="'+esc(subs)+'" placeholder="Alt kalemler" style="margin-top:5px">'+
+       (sav?'':'<input type="text" data-f="subs" value="'+esc(subs)+'" placeholder="Alt kalemler" style="margin-top:5px">')+
        '<div class="row" style="margin-top:5px;justify-content:flex-end"><button class="ghost slim" onclick="dropCatRow(this,\''+kind+'\',\''+c.id+'\')">Kategoriyi kaldır</button></div></div>';
   });
-  h+='</div><button class="ghost slim" onclick="addCatRow()">Kategori ekle</button>';
+  h+='</div><button class="ghost slim" onclick="addCatRow(\''+kind+'\')">Kategori ekle</button>';
   h+='<div class="row" style="margin-top:14px"><button class="ghost grow" onclick="closeSheet()">Vazgeç</button><button class="grow" onclick="saveCatsMeta(\''+kind+'\')">Kaydet</button></div>';
   openSheet(h);
 }
-function addCatRow(){
+function addCatRow(kind){
   var id='c'+Date.now().toString(36);
   var d=document.createElement('div');
   d.className='catrow'; d.dataset.id=id;
-  d.innerHTML='<input type="text" data-f="n" placeholder="Kategori adı"><input type="text" data-f="subs" placeholder="Alt kalemler" style="margin-top:5px">'+
+  d.innerHTML='<input type="text" data-f="n" placeholder="Kategori adı">'+
+    (kind==='savingCats'?'':'<input type="text" data-f="subs" placeholder="Alt kalemler" style="margin-top:5px">')+
     '<div class="row" style="margin-top:5px;justify-content:flex-end"><button class="ghost slim" onclick="this.closest(\'.catrow\').remove()">Kategoriyi kaldır</button></div>';
   document.getElementById('mcList').appendChild(d);
 }
@@ -1222,31 +1799,14 @@ function dropCatRow(btn,kind,id){
   btn.closest('.catrow').remove();
 }
 function saveCatsMeta(kind){
-  var out=[], old=S[kind];
+  var out=[], old=S[kind], sav=kind==='savingCats';
   document.getElementById('mcList').querySelectorAll('.catrow').forEach(function(r){
     var id=r.dataset.id;
     var n=r.querySelector('[data-f=n]').value.trim(); if(!n)return;
-    var subsRaw=r.querySelector('[data-f=subs]').value.split(',').map(function(x){return x.trim();}).filter(Boolean);
     var prev=old.filter(function(c){return c.id===id;})[0]||{};
-    var subs=subsRaw;
-    if(kind==='savingCats'){
-      /* Yeni alt kalem, kalan paydan beslenir. Böylece eskileri bozulmadan
-         toplam 100'ü aşmaz. Çıkarılan kalemin payı yeniye geçer. */
-      var kalanlar=[], yeniler=[];
-      subsRaw.forEach(function(x){
-        var pv=(prev.subs||[]).filter(function(s){return s.n===x;})[0];
-        if(pv) kalanlar.push({n:x,p:+pv.p||0}); else yeniler.push({n:x,p:0});
-      });
-      var kt=0; kalanlar.forEach(function(o){kt+=o.p;});
-      if(yeniler.length){
-        var pay=Math.max(0,100-kt)/yeniler.length;
-        yeniler.forEach(function(o){ o.p=Math.round(pay*10)/10; });
-      }
-      subs=subsRaw.map(function(x){
-        return kalanlar.filter(function(k){return k.n===x;})[0] ||
-               yeniler.filter(function(k){return k.n===x;})[0];
-      });
-    }
+    var subsEl=r.querySelector('[data-f=subs]');
+    var subs = sav ? clone(prev.subs||[])
+      : (subsEl?subsEl.value.split(',').map(function(x){return x.trim();}).filter(Boolean):(prev.subs||[]));
     out.push({id:id,n:n,p:prev.p||0,unit:prev.unit||'adet',subs:subs,fund:prev.fund});
   });
   S[kind]=out;
@@ -1256,6 +1816,10 @@ function saveCatsMeta(kind){
       var ex=pl[key].filter(function(x){return x.id===c.id;})[0];
       return {id:c.id,p:ex?ex.p:0};
     });
+    if(sav){
+      if(!pl.subs) pl.subs={};
+      out.forEach(function(c){ if(!pl.subs[c.id]) pl.subs[c.id]=clone(c.subs||[]); });
+    }
   });
   save(); closeSheet(); render();
 }
@@ -1280,12 +1844,47 @@ function saveFunds(){
   });
   save(); closeSheet(); render();
 }
+function manageAccounts(){
+  var h='<h2>Kartlar ve hesaplar</h2><p class="sub">Kaldırdığınız kart seçim listesinden çıkar. Eski kayıtlarda ve raporlarda adı görünmeye devam eder.</p><div id="acList">';
+  S.accounts.filter(function(a){return !a.off;}).forEach(function(a){ h+=accRow(a); });
+  h+='</div><div class="row" style="gap:8px"><button class="ghost slim" onclick="addAccRow(\'kart\')">Kart ekle</button><button class="ghost slim" onclick="addAccRow(\'hesap\')">Hesap ekle</button></div>';
+  h+='<div class="row" style="margin-top:14px"><button class="ghost grow" onclick="closeSheet()">Vazgeç</button><button class="grow" onclick="saveAccounts()">Kaydet</button></div>';
+  openSheet(h);
+}
+function accRow(a){
+  var n=a.id?accUse(a.id):0;
+  return '<div class="catrow acrow" data-id="'+esc(a.id||'')+'"><div class="row">'+
+    '<input type="text" class="grow" data-f="n" value="'+esc(a.n||'')+'" placeholder="'+(a.t==='hesap'?'Hesap adı':'Kart adı')+'">'+
+    '<select data-f="t" style="width:auto;flex:none"><option value="kart"'+(a.t!=='hesap'?' selected':'')+'>Kart</option><option value="hesap"'+(a.t==='hesap'?' selected':'')+'>Hesap</option></select>'+
+    '<button class="ghost slim" aria-label="Kaldır" onclick="this.closest(\'.acrow\').remove()">×</button></div>'+
+    (n?'<p class="lbl" style="margin-top:3px">'+n+' kayıtta kullanılıyor</p>':'')+'</div>';
+}
+function addAccRow(t){
+  var d=document.createElement('div'); d.innerHTML=accRow({id:'',n:'',t:t});
+  var row=d.firstChild; document.getElementById('acList').appendChild(row);
+  row.querySelector('[data-f=n]').focus();
+}
+function saveAccounts(){
+  var seen={};
+  document.getElementById('acList').querySelectorAll('.acrow').forEach(function(r,ix){
+    var id=r.dataset.id, n=r.querySelector('[data-f=n]').value.trim(), t=r.querySelector('[data-f=t]').value;
+    if(!n) return;
+    var a=id?accById(id):null;
+    if(a){ a.n=n; a.t=t; a.off=false; seen[a.id]=1; }
+    else { var nid='a'+Date.now().toString(36)+ix; S.accounts.push({id:nid,n:n,t:t}); seen[nid]=1; }
+  });
+  S.accounts.forEach(function(a){ if(!seen[a.id]) a.off=true; });
+  if(S.lastAcc.h && !seen[S.lastAcc.h]) S.lastAcc.h='';
+  if(S.lastAcc.y && !seen[S.lastAcc.y]) S.lastAcc.y='';
+  save(); closeSheet(); render();
+}
 function exportData(){
-  var blob=new Blob([JSON.stringify(S,null,1)],{type:'application/json'});
-  var a=document.createElement('a');
-  a.href=URL.createObjectURL(blob);
-  a.download='butce-yedek-'+today()+'.json';
-  document.body.appendChild(a); a.click(); a.remove();
+  download(JSON.stringify(S,null,1),'application/json','butce-yedek-'+today()+'.json');
+}
+function exportOld(){
+  var raw=null; try{ raw=localStorage.getItem(KEY+'_eski'); }catch(e){}
+  if(!raw){ alert('Güncelleme öncesi kopya bulunamadı.'); return; }
+  download(raw,'application/json','butce-guncelleme-oncesi.json');
 }
 function importData(input){
   var f=input.files[0]; if(!f)return;
@@ -1293,9 +1892,9 @@ function importData(input){
   r.onload=function(){
     try{
       var d=JSON.parse(r.result);
-      if(!d.v) throw new Error('format');
+      if(!d.v || !d.plans || !Array.isArray(d.expenses)) throw new Error('format');
       if(!confirm('Mevcut veriler yedekteki verilerle değiştirilecek. Devam edilsin mi?'))return;
-      S=d; save(); render();
+      S=migrate(d); save(); render(); toast('Yedek yüklendi.');
     }catch(e){ alert('Dosya okunamadı. Bu uygulamadan alınmış bir yedek dosyası seçin.'); }
   };
   r.readAsText(f);
